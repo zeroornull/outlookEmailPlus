@@ -307,6 +307,20 @@
             return translateAppTextLocal(zhStatusMap[normalized] || normalized || '正常');
         }
 
+        function formatAccountHealthLabel(account) {
+            if (!account.health_status) {
+                return formatAccountStatusLabel(account.status);
+            }
+            const healthLabels = {
+                active: '正常',
+                disabled: '停用',
+                expired: '授权过期',
+                error: '刷新异常',
+                pending_refresh: '待验证'
+            };
+            return translateAppTextLocal(healthLabels[account.health_status] || account.health_status);
+        }
+
         function isRefreshableOutlookAccount(accountLike) {
             const accountType = String(accountLike?.account_type || 'outlook').trim().toLowerCase();
             const provider = String(accountLike?.provider || 'outlook').trim().toLowerCase();

@@ -78,16 +78,11 @@ import {
 import {
   ACCOUNT_STATUS_OPTIONS,
   accountStatusLabel,
+  healthStatusColor,
+  healthStatusLabel,
   refreshStatusLabel,
 } from '@/utils/statusLabels';
 
-const statusColor = (status?: string) => {
-  const s = String(status || '').toLowerCase();
-  if (s === 'active') return 'success';
-  if (s === 'expired' || s === 'inactive' || s === 'disabled') return 'default';
-  if (s === 'error' || s === 'failed') return 'error';
-  return 'processing';
-};
 
 /** 把后端 tags 字段归一化成 TagItem[]（兼容字符串形态） */
 const normalizeTags = (
@@ -252,11 +247,12 @@ const AccountsPage: React.FC = () => {
       search: false,
       render: (_, row) => (
         <Tag
-          color={statusColor(row.status)}
+          color={healthStatusColor(row.health_status ?? row.status)}
+          title={String(row.status || '').toLowerCase() === 'active' ? '点击停用账号' : '点击启用账号'}
           style={{ cursor: 'pointer' }}
           onClick={() => void onToggleStatus(row)}
         >
-          {accountStatusLabel(row.status)}
+          {healthStatusLabel(row.health_status ?? row.status)}
         </Tag>
       ),
     },

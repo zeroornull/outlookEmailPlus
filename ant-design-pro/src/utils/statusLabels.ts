@@ -10,6 +10,14 @@ const ACCOUNT_STATUS: Record<string, string> = {
   pending: '待处理',
 };
 
+const HEALTH_STATUS: Record<string, string> = {
+  active: '正常',
+  disabled: '停用',
+  expired: '授权过期',
+  error: '刷新异常',
+  pending_refresh: '待验证',
+};
+
 const REFRESH_STATUS: Record<string, string> = {
   success: '成功',
   failed: '失败',
@@ -43,6 +51,20 @@ function mapLabel(dict: Record<string, string>, raw?: string | null): string {
 
 export function accountStatusLabel(status?: string | null): string {
   return mapLabel(ACCOUNT_STATUS, status);
+}
+
+export function healthStatusLabel(health?: string | null): string {
+  const key = String(health || '').toLowerCase();
+  return HEALTH_STATUS[key] || accountStatusLabel(health);
+}
+
+export function healthStatusColor(health?: string | null): string {
+  const key = String(health || '').toLowerCase();
+  if (key === 'active') return 'success';
+  if (key === 'expired' || key === 'error' || key === 'failed') return 'error';
+  if (key === 'disabled' || key === 'inactive') return 'default';
+  if (key === 'pending_refresh') return 'gold';
+  return 'processing';
 }
 
 export function refreshStatusLabel(status?: string | null): string {

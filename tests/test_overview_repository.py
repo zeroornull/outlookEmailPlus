@@ -12,6 +12,7 @@ import time
 import sqlite3
 import unittest
 
+from unittest.mock import patch
 from tests._import_app import import_web_app_module
 
 
@@ -162,6 +163,65 @@ class OverviewSummaryRepositoryTests(OverviewRepositoryBaseTests):
         self.assertEqual(result, {"total": 18, "active": 4, "expired": 3,
                                   "pending_refresh": 4, "error": 5, "disabled": 2})
         self.assertEqual(result["total"], sum(value for key, value in result.items() if key != "total"))
+
+    def test_account_api_health_matches_overview_buckets(self):
+        from outlook_web.db import get_db
+        from outlook_web.repositories.overview import get_overview_summary
+
+        with self.app.app_context():
+            db = sqlite3.connect(":memory:")
+            self.addCleanup(db.close)
+            db.row_factory = sqlite3.Row
+            get_db().backup(db)
+        db.execute("DELETE FROM account_refresh_logs")
+        db.execute("DELETE FROM accounts")
+        fixtures = [
+            ("active", "outlook", "success", None, "active"),
+            ("active", "outlook", "failed", "INVALID_GRANT: revoked", "expired"),
+            ("active", "outlook", "failed", "network timeout", "error"),
+            ("active", "outlook", None, None, "pending_refresh"),
+            ("inactive", "outlook", "failed", "invalid_grant", "disabled"),
+            ("active", "imap", "failed", "invalid_grant", "active"),
+        ]
+        expected = {}
+        for index, (status, kind, log_status, error, health) in enumerate(fixtures):
+            email = f"api-health-{index}@example.test"
+            account_id = db.execute(
+                "INSERT INTO accounts (email, client_id, refresh_token, status, account_type, provider) "
+                "VALUES (?, 'cid', '', ?, ?, 'outlook')",
+                (email, status, kind),
+            ).lastrowid
+            expected[account_id] = health
+            if log_status is not None:
+                # Same timestamps ensure latest insertion ID determines health.
+                for refresh_status, refresh_error in [("success", None), (log_status, error)]:
+                    db.execute(
+                        "INSERT INTO account_refresh_logs "
+                        "(account_id, account_email, status, error_message, created_at) "
+                        "VALUES (?, ?, ?, ?, '2026-01-01 00:00:00')",
+                        (account_id, email, refresh_status, refresh_error),
+                    )
+        db.commit()
+        summary = get_overview_summary(db)["account_status"]
+        self.assertEqual(summary, {"total": 6, "active": 2, "expired": 1,
+                                   "pending_refresh": 1, "error": 1, "disabled": 1})
+        client = self.app.test_client()
+        with client.session_transaction() as session:
+            session["logged_in"] = True
+        with patch("outlook_web.repositories.accounts.get_db", return_value=db), patch(
+            "outlook_web.controllers.accounts.get_db", return_value=db
+        ):
+            response = client.get("/api/accounts")
+            self.assertEqual(response.status_code, 200)
+            accounts = response.get_json()["accounts"]
+            self.assertEqual({account["id"]: account["health_status"] for account in accounts}, expected)
+            for health in ("active", "expired", "pending_refresh", "error", "disabled"):
+                self.assertEqual(sum(account["health_status"] == health for account in accounts), summary[health])
+            for account_id, health in expected.items():
+                with self.subTest(account_id=account_id):
+                    response = client.get(f"/api/accounts/{account_id}")
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.get_json()["account"]["health_status"], health)
 
 
 class OverviewVerificationStatsRepositoryTests(OverviewRepositoryBaseTests):

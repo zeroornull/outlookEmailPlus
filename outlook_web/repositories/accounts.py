@@ -24,6 +24,41 @@ VERIFICATION_CHANNEL_FIELDS = (
 )
 
 
+def classify_account_health(
+    status: Any,
+    account_type: Any,
+    provider: Any,
+    latest_log_status: Any,
+    latest_log_error: Any,
+    last_refresh_at: Any,
+    *,
+    latest_log_exists: bool,
+) -> str:
+    """Classify account health using the same precedence as the overview query."""
+    admin_status = str(status or "").strip().lower()
+    if admin_status in {"disabled", "inactive"}:
+        return "disabled"
+    if admin_status == "expired":
+        return "expired"
+    if admin_status in {"pending_refresh", "refresh_required"}:
+        return "pending_refresh"
+    if admin_status != "active":
+        return "error"
+    if (str(account_type or "").strip().lower() or "outlook") != "outlook" or (
+        str(provider or "").strip().lower() or "outlook"
+    ) != "outlook":
+        return "active"
+    refresh_status = str(latest_log_status or "").strip().lower()
+    if refresh_status == "success":
+        return "active"
+    if refresh_status in {"failed", "error"}:
+        error = str(latest_log_error or "").lower()
+        return "expired" if "invalid_grant" in error or "aadsts70000" in error else "error"
+    if not latest_log_exists and str(last_refresh_at or "").strip():
+        return "active"
+    return "pending_refresh"
+
+
 def _normalize_account_email_domain(email: str) -> str:
     """从邮箱地址提取并规范化域名（小写，去空白）。"""
     if not email or "@" not in email:

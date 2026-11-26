@@ -12,6 +12,7 @@ export type AccountItem = {
   group_color?: string;
   remark?: string | null;
   status?: string;
+  health_status?: string | null;
   tags?: Array<{ id?: number; name?: string; color?: string } | string>;
   notification_enabled?: boolean;
   telegram_push_enabled?: boolean;

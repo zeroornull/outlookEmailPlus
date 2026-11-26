@@ -244,7 +244,7 @@
                     <span class="tag-chip">${escapeHtml(tag.name)}</span>
                 `).join('');
                 const providerText = (account.provider || account.account_type || 'outlook').toUpperCase();
-                const statusText = formatAccountStatusLabel(account.status);
+                const statusText = formatAccountHealthLabel(account);
                 const latestEmailMeta = [
                     latestEmailFrom || translateCompactText('未知发件人'),
                     latestEmailFolder || '',

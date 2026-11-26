@@ -111,6 +111,7 @@
         '待刷新': 'Pending Refresh',
         '异常': 'Error',
         '授权过期 / 需重新授权': 'Authorization Expired / Reauthorization Required',
+        '授权过期': 'Authorization Expired',
         '待验证': 'Pending Validation',
         '刷新异常': 'Refresh Error',
         '已停用': 'Disabled',
