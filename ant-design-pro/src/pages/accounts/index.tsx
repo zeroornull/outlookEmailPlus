@@ -40,6 +40,11 @@ import {
 } from 'antd';
 import React, { useMemo, useRef, useState } from 'react';
 import {
+  formatAccountImportMessage,
+  submitAccountImport,
+  type AccountImportPayload,
+} from './importAccounts';
+import {
   batchDeleteAccounts,
   batchNotificationToggle,
   batchUpdateAccountGroup,
@@ -1027,7 +1032,6 @@ const AccountsPage: React.FC = () => {
           provider: 'outlook',
           group_id: groupId,
           add_to_pool: false,
-          duplicate_strategy: 'skip',
           imap_port: 993,
         }}
         onValuesChange={(changed) => {
@@ -1036,68 +1040,77 @@ const AccountsPage: React.FC = () => {
           }
         }}
         onFinish={async (values) => {
-          try {
-            const provider = String(values.provider || 'outlook').toLowerCase();
-            const payload: Record<string, any> = {
-              account_string: String(values.account_string || '').trim(),
-              add_to_pool: !!values.add_to_pool,
-            };
-            if (!payload.account_string) {
-              message.error('请输入账号信息');
-              return false;
+          const provider = String(values.provider || 'outlook').toLowerCase();
+          const payload: AccountImportPayload = {
+            account_string: String(values.account_string || '').trim(),
+            add_to_pool: !!values.add_to_pool,
+            duplicate_strategy: 'confirm',
+          };
+          if (!payload.account_string) {
+            message.error('请输入账号信息');
+            return false;
+          }
+          if (provider === 'auto') {
+            payload.provider = 'auto';
+            payload.group_id = null;
+            if (values.imap_host) {
+              payload.imap_host = values.imap_host;
+              payload.imap_port = values.imap_port || 993;
             }
-            if (provider === 'auto') {
-              payload.provider = 'auto';
-              payload.group_id = null;
-              payload.duplicate_strategy = values.duplicate_strategy || 'skip';
+          } else {
+            payload.provider = provider;
+            payload.group_id = values.group_id;
+            if (provider === 'custom' || (provider !== 'outlook' && values.imap_host)) {
               if (values.imap_host) {
                 payload.imap_host = values.imap_host;
                 payload.imap_port = values.imap_port || 993;
               }
-            } else {
-              payload.provider = provider;
-              payload.group_id = values.group_id;
-              if (provider === 'custom') {
-                if (values.imap_host) {
-                  payload.imap_host = values.imap_host;
-                  payload.imap_port = values.imap_port || 993;
-                }
-              } else if (provider !== 'outlook' && values.imap_host) {
-                payload.imap_host = values.imap_host;
-                payload.imap_port = values.imap_port || 993;
-              }
             }
+          }
 
-            const res = await createAccount(payload);
-            if (res?.success === false) {
-              message.error(pickAccountErrorMessage(res, '导入失败'));
-              return false;
-            }
-            let msg = res.message || '导入成功';
-            const summary = res.summary;
-            if (summary?.mode === 'auto' && summary.by_provider) {
-              const parts = Object.entries(summary.by_provider as Record<string, any>)
-                .map(([prov, stats]) => {
-                  const s = stats || {};
-                  return `${prov}: 成功 ${s.imported || 0}${
-                    s.skipped ? `, 跳过 ${s.skipped}` : ''
-                  }${s.failed ? `, 失败 ${s.failed}` : ''}`;
-                })
-                .join('；');
-              if (parts) msg = `${msg}（${parts}）`;
-            }
-            message.success(msg);
-            actionRef.current?.reload();
-            return true;
-          } catch (error: any) {
-            message.error(
-              pickAccountErrorMessage(
-                error?.response?.data,
-                error?.message || '导入失败',
-              ),
-            );
+          const result = await submitAccountImport({
+            payload,
+            create: (body) => createAccount(body),
+            confirmOverwrite: (emails) => {
+              const { promise, resolve } = Promise.withResolvers<boolean>();
+              let settled = false;
+              const finish = (overwrite: boolean) => {
+                if (settled) return;
+                settled = true;
+                resolve(overwrite);
+              };
+              modal.confirm({
+                title: '覆盖并导入同名邮箱？',
+                content: (
+                  <div>
+                    <Typography.Paragraph>
+                      以下邮箱已存在。覆盖后保留原分组、标签、备注和管理员启用状态，并更新本次填写的凭据。Outlook
+                      令牌若有变化，需待验证后生效。
+                    </Typography.Paragraph>
+                    <ul style={{ maxHeight: 180, overflow: 'auto', marginBottom: 0 }}>
+                      {emails.map((email) => (
+                        <li key={email}>{email}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ),
+                okText: '覆盖并导入',
+                cancelText: '取消',
+                onOk: () => finish(true),
+                onCancel: () => finish(false),
+                afterClose: () => finish(false),
+              });
+              return promise;
+            },
+          });
+          if (result.outcome === 'cancelled') return false;
+          if (result.outcome === 'failed') {
+            message.error(pickAccountErrorMessage(result.response, result.message));
             return false;
           }
+          message.success(formatAccountImportMessage(result.response));
+          actionRef.current?.reload();
+          return true;
         }}
       >
         <ProFormSelect
@@ -1115,16 +1128,7 @@ const AccountsPage: React.FC = () => {
             rules={[{ required: true, message: '请选择分组' }]}
             fieldProps={{ loading: groupsQuery.isLoading }}
           />
-        ) : (
-          <ProFormSelect
-            name="duplicate_strategy"
-            label="重复账号策略"
-            options={[
-              { label: '跳过', value: 'skip' },
-              { label: '覆盖', value: 'overwrite' },
-            ]}
-          />
-        )}
+        ) : null}
         <ProFormTextArea
           name="account_string"
           label="账号文本"

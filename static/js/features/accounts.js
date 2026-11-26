@@ -151,14 +151,13 @@
             const input = document.getElementById('accountInput');
             const hint = document.getElementById('accountFormatHint');
             const customFields = document.getElementById('customImapFields');
-            const duplicateGroup = document.getElementById('duplicateStrategyGroup');
+
             const fallbackGroup = document.getElementById('fallbackImapGroup');
             const importGroupSelect = document.getElementById('importGroupSelect');
 
             if (!input || !hint || !customFields) return;
 
-            // 重置 auto 模式特有的 UI
-            if (duplicateGroup) duplicateGroup.style.display = 'none';
+            // 重复邮箱在提交时确认，不再按导入模式选择跳过或覆盖
             if (fallbackGroup) fallbackGroup.style.display = 'none';
             if (importGroupSelect) {
                 importGroupSelect.disabled = false;
@@ -166,7 +165,7 @@
 
             if (p === 'auto') {
                 customFields.style.display = 'none';
-                if (duplicateGroup) duplicateGroup.style.display = '';
+
                 if (fallbackGroup) fallbackGroup.style.display = '';
                 input.placeholder = translateAppTextLocal('支持混合格式，每行一个账号...\nOutlook: 邮箱----密码----client_id----refresh_token\nIMAP: 邮箱----授权码----provider\n或: 邮箱----密码（自动识别类型）\n临时邮箱: 仅邮箱地址');
                 hint.textContent = translateAppTextLocal('智能识别模式：自动按每行格式和邮箱域名判断类型，自动分组');
@@ -231,13 +230,7 @@
                 if (hostEl) hostEl.value = '';
                 if (portEl) portEl.value = '993';
 
-                // 重置 auto 模式的字段
-                const fbHostEl = document.getElementById('fallbackImapHost');
-                const fbPortEl = document.getElementById('fallbackImapPort');
-                if (fbHostEl) fbHostEl.value = '';
-                if (fbPortEl) fbPortEl.value = '993';
-                const skipRadio = document.querySelector('input[name="duplicateStrategy"][value="skip"]');
-                if (skipRadio) skipRadio.checked = true;
+                // 重复邮箱改为提交时确认
             });
             document.getElementById('addAccountModal').classList.add('show');
         }
@@ -246,6 +239,78 @@
         function hideAddAccountModal() {
             document.getElementById('addAccountModal').classList.remove('show');
         }
+
+        let importDuplicateResolver = null;
+
+        function importDuplicateEmails(response, data) {
+            const body = data || response?.data || response?.response?.data;
+            const status = response?.status || response?.response?.status;
+            const code = body?.error?.code;
+            if (status !== 409 || code !== 'ACCOUNT_IMPORT_DUPLICATES' || !Array.isArray(body?.duplicates)) {
+                return null;
+            }
+            const emails = body.duplicates.filter(email => typeof email === 'string' && email.trim());
+            return emails.length ? emails : null;
+        }
+
+        async function postAccountImport(body) {
+            try {
+                const response = await fetch('/api/accounts', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                let data = {};
+                try {
+                    data = await response.json();
+                } catch (error) {
+                    data = {};
+                }
+                return { response, data };
+            } catch (error) {
+                const emails = importDuplicateEmails(error);
+                if (emails) {
+                    return { response: { status: 409 }, data: error.response?.data || error.data };
+                }
+                throw error;
+            }
+        }
+
+        function confirmImportDuplicates(emails) {
+            const list = document.getElementById('importDuplicateList');
+            const hint = document.getElementById('importDuplicateHint');
+            if (hint) {
+                hint.textContent = translateAppTextLocal('覆盖会保留原分组、标签、备注和管理启用状态，并更新本次提供的凭据。Outlook 凭据变更后需重新验证。');
+            }
+            if (list) {
+                list.replaceChildren();
+                emails.forEach(email => {
+                    const item = document.createElement('li');
+                    item.textContent = email;
+                    list.appendChild(item);
+                });
+            }
+            document.getElementById('importDuplicateModal')?.classList.add('show');
+            return new Promise(resolve => {
+                importDuplicateResolver = resolve;
+            });
+        }
+
+        function finishImportDuplicateConfirm(confirmed) {
+            document.getElementById('importDuplicateModal')?.classList.remove('show');
+            const resolve = importDuplicateResolver;
+            importDuplicateResolver = null;
+            if (resolve) resolve(confirmed);
+        }
+
+        function confirmImportDuplicateOverwrite() {
+            finishImportDuplicateConfirm(true);
+        }
+
+        function cancelImportDuplicateOverwrite() {
+            finishImportDuplicateConfirm(false);
+        }
+
 
         function resolveImportGroupId(rawGroupId) {
             return Number.isInteger(rawGroupId) && rawGroupId > 0 ? rawGroupId : null;
@@ -295,13 +360,11 @@
             }
 
             try {
-                const payload = { account_string: input, group_id: groupId, add_to_pool: addToPool };
+                const payload = { account_string: input, group_id: groupId, add_to_pool: addToPool, duplicate_strategy: 'confirm' };
 
                 if (provider === 'auto') {
                     payload.provider = 'auto';
                     payload.group_id = null;
-                    const strategyEl = document.querySelector('input[name="duplicateStrategy"]:checked');
-                    payload.duplicate_strategy = strategyEl ? strategyEl.value : 'skip';
                     const fbHost = (document.getElementById('fallbackImapHost')?.value || '').trim();
                     const fbPort = parseInt(document.getElementById('fallbackImapPort')?.value || '993', 10);
                     if (fbHost) {
@@ -329,14 +392,24 @@
                         }
                     }
                 }
+                let posted = await postAccountImport(payload);
+                let response = posted.response;
+                let data = posted.data;
 
-                const response = await fetch('/api/accounts', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
-
-                const data = await response.json();
+                const duplicateEmails = importDuplicateEmails(response, data);
+                if (duplicateEmails) {
+                    const confirmed = await confirmImportDuplicates(duplicateEmails);
+                    if (!confirmed) {
+                        return false;
+                    }
+                    posted = await postAccountImport({
+                        ...payload,
+                        duplicate_strategy: 'overwrite',
+                        preserve_existing_group: true
+                    });
+                    response = posted.response;
+                    data = posted.data;
+                }
 
                 if (data.success) {
                     // Auto 模式增强结果展示
@@ -379,7 +452,13 @@
                     handleApiError(data, '导入邮箱失败');
                 }
             } catch (error) {
+                const emails = importDuplicateEmails(error);
+                if (emails) {
+                    showToast(translateAppTextLocal('存在同名邮箱账号，请确认是否覆盖'), 'error');
+                    return false;
+                }
                 showToast(translateAppTextLocal('添加失败'), 'error');
+                return false;
             }
         }
 

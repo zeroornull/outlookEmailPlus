@@ -125,20 +125,6 @@
                     <input type="number" class="form-input" id="imapPort" placeholder="993" value="993" min="1" max="65535">
                     <div class="form-hint">仅自定义 IMAP 需要填写；端口通常为 993（SSL）</div>
                 </div>
-                <!-- 重复账号处理策略（仅混合导入模式显示）-->
-                <div class="form-group" id="duplicateStrategyGroup" style="display:none;">
-                    <label class="form-label">重复账号处理</label>
-                    <div class="radio-group">
-                        <label class="radio-label">
-                            <input type="radio" name="duplicateStrategy" value="skip" checked>
-                            跳过重复（已存在的账号保持不变）
-                        </label>
-                        <label class="radio-label">
-                            <input type="radio" name="duplicateStrategy" value="overwrite">
-                            覆盖更新（用导入数据更新已存在账号的凭据）
-                        </label>
-                    </div>
-                </div>
                 <!-- 兜底 IMAP 设置（仅混合导入模式显示）-->
                 <div class="form-group" id="fallbackImapGroup" style="display:none;">
                     <label class="form-label">未知域名的 IMAP 设置（可选）</label>
@@ -167,6 +153,23 @@
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="hideAddAccountModal()">取消</button>
                 <button class="btn btn-primary" onclick="addAccount()">导入</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="importDuplicateModal" onclick="if(event.target === this) cancelImportDuplicateOverwrite()">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>存在同名邮箱账号，请确认是否覆盖</h3>
+                <button class="modal-close" type="button" onclick="cancelImportDuplicateOverwrite()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-hint" id="importDuplicateHint">覆盖会保留原分组、标签、备注和管理启用状态，并更新本次提供的凭据。Outlook 凭据变更后需重新验证。</div>
+                <ul id="importDuplicateList"></ul>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" type="button" onclick="cancelImportDuplicateOverwrite()">取消</button>
+                <button class="btn btn-primary" type="button" onclick="confirmImportDuplicateOverwrite()">覆盖并导入</button>
             </div>
         </div>
     </div>

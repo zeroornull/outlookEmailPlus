@@ -338,6 +338,36 @@ def api_add_account() -> Any:
             message_en="Please enter account information",
         )
 
+    if (data.get("duplicate_strategy") or "").strip().lower() == "confirm":
+        duplicates = []
+        seen = set()
+        merged = []
+        for raw in account_str.splitlines():
+            stripped = raw.strip()
+            if not stripped:
+                continue
+            if merged and not merged[-1].startswith("#") and "----" not in stripped and not stripped.startswith("#"):
+                merged[-1] += stripped
+            else:
+                merged.append(stripped)
+        for line in merged:
+            if line.startswith("#"):
+                continue
+            email = line.split("----", 1)[0].strip()
+            if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+                continue
+            key = email.casefold()
+            existing = _get_import_account(email)
+            if existing and key not in seen:
+                seen.add(key)
+                duplicates.append(existing["email"])
+        if duplicates:
+            return jsonify({
+                "success": False,
+                "error": {"code": "ACCOUNT_IMPORT_DUPLICATES", "message": "存在同名邮箱账号，请确认是否覆盖"},
+                "duplicates": duplicates,
+            }), 409
+
     # FD-00006: auto 模式允许 group_id=null（自动分组），需在分组校验前分流
     if provider == "auto":
         return _handle_auto_import(data, add_to_pool=add_to_pool)
@@ -578,6 +608,21 @@ def api_add_account() -> Any:
                     )
                 continue
 
+            existing = _get_import_account(email_addr) if data.get("duplicate_strategy") == "overwrite" else None
+            if existing:
+                result = {"type": "imap", "provider": provider, "fields": {
+                    "imap_password": imap_pwd, "imap_host": imap_host, "imap_port": imap_port,
+                }}
+                if _overwrite_account(existing, result, group_id, add_to_pool=add_to_pool,
+                                      preserve_existing_group=_parse_bool_flag(data.get("preserve_existing_group"), default=False)):
+                    imported += 1
+                else:
+                    failed += 1
+                    errors_total += 1
+                    if len(errors) < max_error_details:
+                        errors.append({"line": line_no, "email": email_addr, "error": "覆盖更新失败"})
+                continue
+
             ok = accounts_repo.add_account(
                 email_addr,
                 password="",
@@ -698,6 +743,21 @@ def api_add_account() -> Any:
             errors_total += 1
             if len(errors) < max_error_details:
                 errors.append({"line": line_no, "email": email_addr, "error": "邮箱格式不正确"})
+            continue
+
+        existing = _get_import_account(email_addr) if data.get("duplicate_strategy") == "overwrite" else None
+        if existing:
+            result = {"type": "outlook", "provider": "outlook", "fields": {
+                "password": password, "client_id": client_id, "refresh_token": refresh_token,
+            }}
+            if _overwrite_account(existing, result, group_id, add_to_pool=add_to_pool,
+                                  preserve_existing_group=_parse_bool_flag(data.get("preserve_existing_group"), default=False)):
+                imported += 1
+            else:
+                failed += 1
+                errors_total += 1
+                if len(errors) < max_error_details:
+                    errors.append({"line": line_no, "email": email_addr, "error": "覆盖更新失败"})
             continue
 
         ok = accounts_repo.add_account(
@@ -999,9 +1059,16 @@ def _resolve_auto_group(
     return default_id
 
 
-def _overwrite_account(existing: Dict, detect_result: Dict, group_id: int, add_to_pool: bool = False) -> bool:
+def _get_import_account(email: str) -> Optional[Dict[str, Any]]:
+    """Match mailbox identity without changing its stored spelling or ID."""
+    row = get_db().execute("SELECT * FROM accounts WHERE email = ? COLLATE NOCASE LIMIT 1", (email,)).fetchone()
+    return dict(row) if row else None
+
+
+def _overwrite_account(existing: Dict, detect_result: Dict, group_id: int, add_to_pool: bool = False,
+                       preserve_existing_group: bool = False) -> bool:
     """覆盖更新已存在账号的凭据字段，保留 remark/tags/status。"""
-    fields: Dict[str, Any] = {"group_id": group_id}
+    fields: Dict[str, Any] = {} if preserve_existing_group else {"group_id": group_id}
     d = detect_result
     prov = d["provider"]
     f = d["fields"]
@@ -1012,12 +1079,14 @@ def _overwrite_account(existing: Dict, detect_result: Dict, group_id: int, add_t
         fields["refresh_token"] = f.get("refresh_token", "")
         fields["account_type"] = "outlook"
         fields["provider"] = "outlook"
+        fields.update(imap_password="", imap_host="", imap_port=993)
     elif d["type"] == "imap":
         fields["imap_password"] = f.get("imap_password", "")
         fields["imap_host"] = f.get("imap_host", "")
         fields["imap_port"] = f.get("imap_port", 993)
         fields["account_type"] = "imap"
         fields["provider"] = prov
+        fields.update(password="", client_id="", refresh_token="")
 
     # 若勾选了"加入邮箱池"且该账号尚未处于 available 状态（含 NULL / claimed 等），则同步设置 pool_status
     if add_to_pool and existing.get("pool_status") != "available":
@@ -1213,21 +1282,26 @@ def _handle_auto_import(data: Dict[str, Any], *, add_to_pool: bool = False) -> A
                 by_provider[prov]["failed"] += 1
             continue
 
-        # 解析分组（Outlook/IMAP）
-        if use_auto_group:
+        existing = (
+            _get_import_account(email)
+            if duplicate_strategy == "overwrite"
+            else accounts_repo.get_account_by_email(email)
+        )
+        preserve_group = _parse_bool_flag(data.get("preserve_existing_group"), default=False)
+        if existing and duplicate_strategy == "overwrite" and preserve_group:
+            group_id = existing["group_id"]
+        elif use_auto_group:
             group_id = _resolve_auto_group(prov, group_cache, groups_created)
         else:
             group_id = explicit_group_id
-
-        # 检查重复
-        existing = accounts_repo.get_account_by_email(email)
         if existing:
             if duplicate_strategy == "skip":
                 skipped += 1
                 by_provider[prov]["skipped"] += 1
                 continue
             elif duplicate_strategy == "overwrite":
-                ok = _overwrite_account(existing, result, group_id, add_to_pool=add_to_pool)
+                ok = _overwrite_account(existing, result, group_id, add_to_pool=add_to_pool,
+                                        preserve_existing_group=_parse_bool_flag(data.get("preserve_existing_group"), default=False))
                 if ok:
                     imported += 1
                     by_provider[prov]["imported"] += 1

@@ -42,6 +42,7 @@ import MailboxFolderSwitch, {
 } from '@/components/MailboxFolderSwitch';
 import { usePollingSettingsDraft } from '@/hooks/usePollingSettingsDraft';
 import { summarizeDualFolderPull } from '@/utils/mailboxPull';
+import { isMailboxRoute } from '@/utils/mailboxRoute';
 import { type AccountItem, fetchAccounts } from '@/services/outlook/accounts';
 import {
   deleteEmails,
@@ -126,6 +127,7 @@ function syncMailboxUrl(opts: {
   if (opts.skip && opts.skip > 0) params.set('skip', String(opts.skip));
   if (opts.group) params.set('group', String(opts.group));
   const qs = params.toString();
+  if (!isMailboxRoute(history.location?.pathname || '')) return;
   history.replace(qs ? `/mailbox?${qs}` : '/mailbox');
 }
 
@@ -189,6 +191,12 @@ const MailboxPage: React.FC = () => {
   );
   const listRequestIdRef = useRef(0);
   const detailRequestIdRef = useRef(0);
+  useEffect(() => {
+    return () => {
+      listRequestIdRef.current += 1;
+      detailRequestIdRef.current += 1;
+    };
+  }, []);
 
   const groupsQuery = useQuery({
     queryKey: ['mailbox-groups'],
