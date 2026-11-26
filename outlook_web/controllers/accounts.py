@@ -265,6 +265,12 @@ def api_get_account(account_id: int) -> Any:
             status=404,
         )
 
+    last_refresh_log = get_db().execute(
+        "SELECT status, error_message FROM account_refresh_logs "
+        "WHERE account_id = ? ORDER BY id DESC LIMIT 1",
+        (account_id,),
+    ).fetchone()
+
     return jsonify(
         {
             "success": True,
@@ -283,6 +289,9 @@ def api_get_account(account_id: int) -> Any:
                 "status": account.get("status", "active"),
                 "account_type": account.get("account_type") or "outlook",
                 "provider": account.get("provider") or "outlook",
+                "last_refresh_at": account.get("last_refresh_at"),
+                "last_refresh_status": last_refresh_log["status"] if last_refresh_log else None,
+                "last_refresh_error": last_refresh_log["error_message"] if last_refresh_log else None,
                 "telegram_push_enabled": bool(account.get("telegram_push_enabled")),
                 "notification_enabled": bool(account.get("telegram_push_enabled")),
                 "latest_email_subject": account.get("latest_email_subject", ""),
@@ -2364,7 +2373,7 @@ def api_refresh_account(account_id: int) -> Any:
     if success:
         try:
             if isinstance(new_refresh_token, str) and new_refresh_token.strip() and new_refresh_token != refresh_token:
-                accounts_repo.update_account_credentials(account_id, refresh_token=new_refresh_token)
+                accounts_repo.update_refresh_token_if_changed(account_id, new_refresh_token)
             db.execute(
                 "UPDATE accounts SET last_refresh_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (account_id,),
@@ -2499,9 +2508,9 @@ def api_get_refresh_logs() -> Any:
         SELECT l.*, a.email as account_email
         FROM account_refresh_logs l
         LEFT JOIN accounts a ON l.account_id = a.id
-        WHERE l.refresh_type IN ('manual', 'manual_all', 'scheduled', 'retry', 'oauth_import')
+        WHERE l.refresh_type IN ('manual', 'manual_all', 'scheduled', 'retry', 'oauth_import', 'credentials_updated')
         AND l.created_at >= datetime('now', '-6 months')
-        ORDER BY l.created_at DESC, l.id DESC
+        ORDER BY l.id DESC
         LIMIT ? OFFSET ?
     """,
         (limit, offset),
@@ -2535,7 +2544,7 @@ def api_get_account_refresh_logs(account_id: int) -> Any:
         """
         SELECT * FROM account_refresh_logs
         WHERE account_id = ?
-        ORDER BY created_at DESC, id DESC
+        ORDER BY id DESC
         LIMIT ? OFFSET ?
     """,
         (account_id, limit, offset),
@@ -2574,7 +2583,7 @@ def api_get_failed_refresh_logs() -> Any:
         ) latest ON l.account_id = latest.account_id AND l.id = latest.max_id
         LEFT JOIN accounts a ON l.account_id = a.id
         WHERE l.status = 'failed'
-        ORDER BY l.created_at DESC, l.id DESC
+        ORDER BY l.id DESC
     """)
 
     logs = []
@@ -2705,13 +2714,27 @@ def api_get_refresh_stats() -> Any:
     """)
     failed_count = cursor.fetchone()["failed_count"]
 
+    cursor = db.execute("""
+        SELECT COUNT(*) as pending_count
+        FROM accounts a
+        LEFT JOIN account_refresh_logs l ON l.id = (
+            SELECT MAX(id) FROM account_refresh_logs WHERE account_id = a.id
+        )
+        WHERE a.status = 'active'
+          AND (a.account_type IS NULL OR LOWER(TRIM(a.account_type)) = 'outlook')
+          AND COALESCE(a.provider, '') != 'cloudflare_temp_mail'
+          AND (l.status IS NULL OR l.status NOT IN ('success', 'failed'))
+    """)
+    pending_count = cursor.fetchone()["pending_count"]
+
     return jsonify(
         {
             "success": True,
             "stats": {
                 "total": total_accounts,
-                "success_count": total_accounts - failed_count,
+                "success_count": total_accounts - failed_count - pending_count,
                 "failed_count": failed_count,
+                "pending_count": pending_count,
                 "last_refresh_time": last_refresh_time,
             },
         }

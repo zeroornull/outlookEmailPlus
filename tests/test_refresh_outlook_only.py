@@ -229,6 +229,10 @@ class RefreshOutlookOnlyTests(unittest.TestCase):
         logs = self._get_refresh_logs(account_id=account_id, refresh_type="manual")
         self.assertEqual(len(logs), 1)
         self.assertEqual(logs[0]["status"], "success")
+        self.assertEqual(self._get_refresh_logs(account_id=account_id, refresh_type="credentials_updated"), [])
+        stats = client.get("/api/accounts/refresh-stats").get_json()["stats"]
+        self.assertEqual(stats["success_count"], 1)
+        self.assertEqual(stats["pending_count"], 0)
 
     def test_manual_single_refresh_allows_legacy_null_account_type(self):
         client = self.app.test_client()
@@ -508,6 +512,9 @@ class RefreshOutlookOnlyTests(unittest.TestCase):
         imap_id = self._insert_imap_account(
             email_addr=f"imap_{uuid.uuid4().hex}@example.com", unique="imap"
         )
+        pending_id = self._insert_outlook_account(
+            email_addr=f"pending_{uuid.uuid4().hex}@outlook.com", unique="pending"
+        )
         conn = self.module.create_sqlite_connection()
         try:
             timestamp = conn.execute("SELECT datetime('now')").fetchone()[0]
@@ -515,6 +522,7 @@ class RefreshOutlookOnlyTests(unittest.TestCase):
                 (recovered_id, (("failed", "manual"), ("success", "oauth_import"))),
                 (failed_id, (("success", "oauth_import"), ("failed", "manual"))),
                 (imap_id, (("success", "oauth_import"), ("failed", "manual"))),
+                (pending_id, (("failed", "manual"), ("pending", "credentials_updated"))),
             ):
                 email = conn.execute("SELECT email FROM accounts WHERE id = ?", (account_id,)).fetchone()[0]
                 for status, refresh_type in states:
@@ -542,7 +550,7 @@ class RefreshOutlookOnlyTests(unittest.TestCase):
         refresh.assert_called_once()
         self.assertEqual(refresh.call_args.args[:2], ("client_failed", "rt_failed"))
         self.assertEqual(len(self._get_refresh_logs(account_id=failed_id, refresh_type="retry")), 1)
-        for account_id in (recovered_id, imap_id):
+        for account_id in (recovered_id, imap_id, pending_id):
             self.assertEqual(self._get_refresh_logs(account_id=account_id, refresh_type="retry"), [])
 
     def test_manual_trigger_scheduled_refresh_conflict_returns_actionable_message(self):

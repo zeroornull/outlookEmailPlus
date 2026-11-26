@@ -1,5 +1,7 @@
 import unittest
 import uuid
+import sqlite3
+from unittest.mock import patch
 
 from tests._import_app import clear_login_attempts, import_web_app_module
 
@@ -255,3 +257,113 @@ class AccountRemarkOnlyUpdateTests(unittest.TestCase):
         self.assertEqual(self._decrypt_if_needed(row["imap_password"]), account["imap_password"])
         self.assertEqual(row["client_id"], "")
         self.assertEqual(row["refresh_token"], "")
+
+
+class CredentialEvidenceWriteTests(unittest.TestCase):
+    def setUp(self):
+        import_web_app_module()
+        from outlook_web.repositories import accounts
+
+        self.repo = accounts
+        self.db = sqlite3.connect(":memory:")
+        self.db.row_factory = sqlite3.Row
+        self.addCleanup(self.db.close)
+        self.db.executescript(
+            """
+            CREATE TABLE accounts (
+                id INTEGER PRIMARY KEY, email TEXT, password TEXT, client_id TEXT,
+                refresh_token TEXT, account_type TEXT, imap_password TEXT,
+                group_id INTEGER, remark TEXT, status TEXT, email_domain TEXT,
+                updated_at TEXT, last_refresh_at TEXT
+            );
+            CREATE TABLE account_refresh_logs (
+                id INTEGER PRIMARY KEY, account_id INTEGER, refresh_type TEXT,
+                account_email TEXT,
+                status TEXT, error_message TEXT
+            );
+            """
+        )
+        self.db.execute(
+            "INSERT INTO accounts VALUES (1, ?, ?, ?, ?, 'outlook', '', 1, 'keep', 'disabled', '', NULL, '2025-01-01')",
+            ("e@outlook.com", accounts.encrypt_data("pw"), "cid", accounts.encrypt_data("old")),
+        )
+        self.db.execute(
+            "INSERT INTO account_refresh_logs (id, account_id, refresh_type, status, error_message) VALUES (1, 1, 'auto', 'failed', 'old failure')"
+        )
+        self.db.commit()
+        patcher = patch.object(accounts, "get_db", return_value=self.db)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _row(self):
+        return self.db.execute("SELECT * FROM accounts WHERE id = 1").fetchone()
+
+    def _logs(self):
+        return self.db.execute("SELECT * FROM account_refresh_logs ORDER BY id").fetchall()
+
+    def test_overwrite_records_pending_and_preserves_history_and_status(self):
+        self.assertTrue(self.repo.update_account_credentials(1, refresh_token="new"))
+        row = self._row()
+        self.assertNotEqual(row["refresh_token"], "new")
+        self.assertEqual(self.repo.decrypt_data(row["refresh_token"]), "new")
+        self.assertIsNone(row["last_refresh_at"])
+        self.assertEqual(row["status"], "disabled")
+        self.assertEqual(row["remark"], "keep")
+        logs = self._logs()
+        self.assertEqual(logs[0]["error_message"], "old failure")
+        self.assertEqual((logs[-1]["refresh_type"], logs[-1]["status"], logs[-1]["error_message"]),
+                         ("credentials_updated", "pending", None))
+
+    def test_identical_credentials_and_metadata_preserve_failed_evidence(self):
+        self.assertTrue(self.repo.update_account_credentials(1, refresh_token="old", client_id="cid"))
+        self.assertTrue(self.repo.update_account_credentials(1, password="new password", group_id=2))
+        self.assertEqual(len(self._logs()), 1)
+        self.assertEqual(self._row()["last_refresh_at"], "2025-01-01")
+
+    def test_manual_token_and_client_changes_record_pending(self):
+        for client_id, token in (("cid", "new"), ("new cid", "new")):
+            self.assertTrue(self.repo.update_account(1, "e@outlook.com", None, client_id, token, 2, "edited", "disabled"))
+            self.assertEqual(self._logs()[-1]["status"], "pending")
+        self.assertEqual(len(self._logs()), 3)
+
+    def test_manual_metadata_preserves_failed_evidence(self):
+        self.assertTrue(self.repo.update_account(1, "e@outlook.com", None, None, None, 2, "edited", "disabled"))
+        self.assertEqual(len(self._logs()), 1)
+        self.assertEqual(self._row()["last_refresh_at"], "2025-01-01")
+
+    def test_unreadable_old_token_can_be_replaced(self):
+        self.db.execute("UPDATE accounts SET refresh_token = 'unreadable' WHERE id = 1")
+        self.db.commit()
+        self.assertTrue(self.repo.update_account_credentials(1, refresh_token="new"))
+        self.assertEqual(self._logs()[-1]["status"], "pending")
+
+    def test_evidence_failure_rolls_back_both_writers(self):
+        self.db.execute(
+            "CREATE TRIGGER reject_pending BEFORE INSERT ON account_refresh_logs BEGIN SELECT RAISE(ABORT, 'blocked'); END"
+        )
+        self.db.commit()
+        self.assertFalse(self.repo.update_account_credentials(1, refresh_token="new", group_id=2))
+        self.assertFalse(self.repo.update_account(1, "changed@outlook.com", None, "new cid", "new", 2, "edited", "active"))
+        row = self._row()
+        self.assertEqual(self.repo.decrypt_data(row["refresh_token"]), "old")
+        self.assertEqual((row["client_id"], row["group_id"], row["remark"], row["status"]),
+                         ("cid", 1, "keep", "disabled"))
+        self.assertEqual(row["last_refresh_at"], "2025-01-01")
+        self.assertEqual(len(self._logs()), 1)
+
+    def test_auth_method_change_supersedes_oauth_failure(self):
+        self.assertTrue(self.repo.update_account_credentials(1, account_type="imap", imap_password="new"))
+        self.assertEqual(self._logs()[-1]["status"], "pending")
+        self.assertTrue(self.repo.update_account_credentials(1, imap_password="changed", group_id=2))
+        self.assertEqual(len(self._logs()), 2)
+
+    def test_later_success_remains_current_after_identical_overwrite(self):
+        self.assertTrue(self.repo.update_account_credentials(1, refresh_token="new"))
+        self.db.execute(
+            "INSERT INTO account_refresh_logs (account_id, refresh_type, status) VALUES (1, 'auto', 'success')"
+        )
+        self.db.execute("UPDATE accounts SET last_refresh_at = '2026-01-01' WHERE id = 1")
+        self.db.commit()
+        self.assertTrue(self.repo.update_account_credentials(1, refresh_token="new", client_id="cid"))
+        self.assertEqual(self._logs()[-1]["status"], "success")
+        self.assertEqual(self._row()["last_refresh_at"], "2026-01-01")

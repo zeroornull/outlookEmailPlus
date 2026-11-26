@@ -7,6 +7,7 @@ export type RefreshLogItem = {
   account_email?: string;
   email?: string;
   status?: string;
+  refresh_type?: string;
   error_message?: string | null;
   message?: string | null;
   error?: string | null;

@@ -14,7 +14,7 @@ const REFRESH_STATUS: Record<string, string> = {
   success: '成功',
   failed: '失败',
   error: '失败',
-  pending: '进行中',
+  pending: '待验证',
   running: '进行中',
   skipped: '已跳过',
 };

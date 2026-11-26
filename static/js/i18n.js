@@ -696,6 +696,7 @@
         '手动': 'Manual',
         '自动': 'Automatic',
         '授权导入': 'Authorization Import',
+        '凭据更新': 'Credentials Updated',
         '刚刚': 'Just now',
         '重试中...': 'Retrying...',
         '重试': 'Retry',

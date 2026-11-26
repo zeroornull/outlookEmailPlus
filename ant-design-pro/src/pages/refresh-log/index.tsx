@@ -38,6 +38,16 @@ const RefreshLogPage: React.FC = () => {
       render: (_, row) => row.account_email || row.email || '--',
     },
     {
+      title: '类型',
+      dataIndex: 'refresh_type',
+      width: 120,
+      search: false,
+      render: (_, row) =>
+        ({ credentials_updated: '凭据更新', oauth_import: '授权导入', manual: '手动', scheduled: '定时', auto: '自动' } as Record<string, string>)[
+          row.refresh_type || ''
+        ] || row.refresh_type || '--',
+    },
+    {
       title: '状态',
       dataIndex: 'status',
       width: 120,

@@ -102,7 +102,7 @@ The `browser-extension/` directory contains a Chrome/Edge Manifest V3 extension.
 - Multi-mailbox management
   Supports Outlook OAuth, regular IMAP mailboxes, and CF Worker temp mailboxes (multi-domain configuration, Admin Key encrypted at rest)
 - Bulk import and organization
-  Supports bulk import, tags, search, groups, and export
+  Supports bulk import, tags, search, groups, and export. Replacing an existing Outlook account's credentials marks the new credentials as pending verification while retaining previous failures as history. A successful validation or OAuth import restores the current status. Skipping duplicates, importing identical credentials, or editing only metadata preserves the existing validation result.
 - Mail reading and extraction
   Supports verification-code extraction, link extraction, and raw message viewing
 - Mail pool orchestration

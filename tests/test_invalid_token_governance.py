@@ -184,6 +184,92 @@ class InvalidTokenGovernanceTests(unittest.TestCase):
         self.assertEqual(stats["failed_count"], baseline["failed_count"] + 1)
         self.assertEqual(stats["success_count"], baseline["success_count"])
 
+    def test_pending_credentials_clear_current_failure_without_claiming_refresh_success(self):
+        client = self.app.test_client()
+        self._login(client)
+        baseline = client.get("/api/accounts/refresh-stats").get_json()["stats"]
+        with self.app.app_context():
+            from outlook_web.db import get_db
+
+            account_id, email = self._insert_account_direct()
+            self._insert_account_direct()
+            db = get_db()
+            timestamp = db.execute("SELECT datetime('now')").fetchone()[0]
+            for status, refresh_type, error in (
+                ("failed", "manual", "invalid_grant"),
+                ("pending", "credentials_updated", None),
+            ):
+                db.execute(
+                    """INSERT INTO account_refresh_logs
+                       (account_id, account_email, status, refresh_type, error_message, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (account_id, email, status, refresh_type, error, timestamp),
+                )
+            db.commit()
+
+        stats = client.get("/api/accounts/refresh-stats").get_json()["stats"]
+        self.assertEqual(stats["total"], baseline["total"] + 2)
+        self.assertEqual(stats["pending_count"], baseline["pending_count"] + 2)
+        self.assertEqual(stats["success_count"], baseline["success_count"])
+        self.assertEqual(stats["failed_count"], baseline["failed_count"])
+        for endpoint, key in (
+            ("refresh-logs/failed", "logs"),
+            ("invalid-token-candidates", "candidates"),
+        ):
+            rows = client.get(f"/api/accounts/{endpoint}").get_json()[key]
+            self.assertNotIn(account_id, [row["account_id"] for row in rows])
+        accounts = client.get("/api/accounts").get_json()["accounts"]
+        listed = next(account for account in accounts if account["id"] == account_id)
+        detail = client.get(f"/api/accounts/{account_id}").get_json()["account"]
+        for account in (listed, detail):
+            self.assertEqual(account["last_refresh_status"], "pending")
+            self.assertIsNone(account["last_refresh_error"])
+            self.assertFalse(account["last_refresh_at"])
+        for endpoint in ("refresh-logs", f"{account_id}/refresh-logs"):
+            rows = client.get(f"/api/accounts/{endpoint}").get_json()["logs"]
+            own = [row for row in rows if row["account_id"] == account_id]
+            self.assertEqual([row["status"] for row in own], ["pending", "failed"])
+            self.assertEqual(own[0]["refresh_type"], "credentials_updated")
+            self.assertIsNone(own[0]["error_message"])
+            self.assertGreater(own[0]["id"], own[1]["id"])
+
+        with self.app.app_context():
+            from outlook_web.db import get_db
+
+            db = get_db()
+            future = db.execute("SELECT datetime('now', '+10 years')").fetchone()[0]
+            db.execute(
+                "UPDATE account_refresh_logs SET created_at = ? WHERE account_id = ? AND status = 'pending'",
+                (future, account_id),
+            )
+            db.commit()
+        self.assertEqual(client.get("/api/accounts/refresh-stats").get_json()["stats"]["last_refresh_time"],
+                         stats["last_refresh_time"])
+        with self.app.app_context():
+            self._insert_refresh_log(account_id, email, "success", None, "oauth_import")
+        recovered = client.get("/api/accounts/refresh-stats").get_json()["stats"]
+        self.assertEqual(recovered["pending_count"], baseline["pending_count"] + 1)
+        self.assertEqual(recovered["success_count"], baseline["success_count"] + 1)
+        for endpoint in ("refresh-logs", f"{account_id}/refresh-logs"):
+            rows = client.get(f"/api/accounts/{endpoint}").get_json()["logs"]
+            own = [row for row in rows if row["account_id"] == account_id]
+            self.assertEqual([row["status"] for row in own], ["success", "pending", "failed"])
+        detail = client.get(f"/api/accounts/{account_id}").get_json()["account"]
+        self.assertEqual(detail["last_refresh_status"], "success")
+        self.assertIsNone(detail["last_refresh_error"])
+        with self.app.app_context():
+            self._insert_refresh_log(account_id, email, "failed", "invalid_grant")
+        for endpoint, key in (
+            ("refresh-logs/failed", "logs"),
+            ("invalid-token-candidates", "candidates"),
+        ):
+            rows = client.get(f"/api/accounts/{endpoint}").get_json()[key]
+            self.assertEqual(len([row for row in rows if row["account_id"] == account_id]), 1)
+        failed = client.get("/api/accounts/refresh-stats").get_json()["stats"]
+        self.assertEqual(failed["pending_count"], baseline["pending_count"] + 1)
+        self.assertEqual(failed["failed_count"], baseline["failed_count"] + 1)
+        self.assertEqual(failed["success_count"], baseline["success_count"])
+
     # ---------- _classify_refresh_failure unit tests ----------
 
     def test_classify_invalid_grant_error(self):

@@ -456,6 +456,38 @@ def add_account(
         return False
 
 
+def _outlook_credentials_changed(existing, updates) -> bool:
+    """Compare plaintext input before encryption; unreadable old tokens can be replaced."""
+    old_type = (existing["account_type"] or "outlook").strip().lower()
+    new_type = (updates.get("account_type", old_type) or "outlook").strip().lower()
+    if (old_type == "imap") != (new_type == "imap"):
+        return True
+    if new_type == "imap":
+        return False
+    if "client_id" in updates and updates["client_id"] != existing["client_id"]:
+        return True
+    if "refresh_token" not in updates:
+        return False
+    old_token = existing["refresh_token"]
+    try:
+        old_token = decrypt_data(old_token) if old_token else old_token
+    except Exception:
+        return True
+    return updates["refresh_token"] != old_token
+
+
+def _record_credentials_updated(db, account_id: int) -> None:
+    """Supersede validation evidence in the same transaction as credential changes."""
+    db.execute("UPDATE accounts SET last_refresh_at = NULL WHERE id = ?", (account_id,))
+    db.execute(
+        """
+        INSERT INTO account_refresh_logs (account_id, account_email, refresh_type, status, error_message)
+        SELECT id, email, 'credentials_updated', 'pending', NULL FROM accounts WHERE id = ?
+        """,
+        (account_id,),
+    )
+
+
 def update_account(
     account_id: int,
     email_addr: str,
@@ -518,6 +550,10 @@ def update_account(
             return True
 
         new_client_id = client_id.strip() if isinstance(client_id, str) and client_id.strip() else existing["client_id"]
+        credential_updates = {"client_id": new_client_id}
+        if isinstance(refresh_token, str) and refresh_token.strip():
+            credential_updates["refresh_token"] = refresh_token
+        credentials_changed = _outlook_credentials_changed(existing, credential_updates)
 
         encrypted_password = existing["password"]
         if isinstance(password, str) and password.strip():
@@ -549,9 +585,12 @@ def update_account(
                 account_id,
             ),
         )
+        if credentials_changed:
+            _record_credentials_updated(db, account_id)
         db.commit()
         return True
     except Exception:
+        db.rollback()
         return False
 
 
@@ -598,22 +637,29 @@ def update_account_credentials(account_id: int, **fields) -> bool:
     if not updates:
         return False
 
-    # 加密敏感字段
-    for key in ("password", "refresh_token", "imap_password"):
-        if key in updates and updates[key]:
-            updates[key] = encrypt_data(updates[key])
-
     db = get_db()
     try:
+        existing = db.execute(
+            "SELECT client_id, refresh_token, account_type FROM accounts WHERE id = ?", (account_id,)
+        ).fetchone()
+        if not existing:
+            return False
+        credentials_changed = _outlook_credentials_changed(existing, updates)
+        for key in ("password", "refresh_token", "imap_password"):
+            if key in updates and updates[key]:
+                updates[key] = encrypt_data(updates[key])
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         values = list(updates.values()) + [account_id]
         db.execute(
             f"UPDATE accounts SET {set_clause}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             values,
         )
+        if credentials_changed:
+            _record_credentials_updated(db, account_id)
         db.commit()
         return True
     except Exception:
+        db.rollback()
         return False
 
 

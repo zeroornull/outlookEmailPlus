@@ -447,6 +447,12 @@ class ImportExportV2AutoTests(unittest.TestCase):
                     "active",
                 ),
             )
+            account_id = conn.execute("SELECT id FROM accounts WHERE email = ?", (email_addr,)).fetchone()["id"]
+            conn.execute("UPDATE accounts SET last_refresh_at = '2025-01-01' WHERE id = ?", (account_id,))
+            conn.execute(
+                "INSERT INTO account_refresh_logs (account_id, account_email, refresh_type, status, error_message) VALUES (?, ?, 'auto', 'failed', 'old failure')",
+                (account_id, email_addr),
+            )
             conn.commit()
         finally:
             conn.close()
@@ -478,6 +484,40 @@ class ImportExportV2AutoTests(unittest.TestCase):
         # overwrite 时应按新分组策略更新 group_id（Outlook -> "Outlook" 分组）
         outlook_gid = self._get_group_id_by_name("Outlook")
         self.assertEqual(int(row["group_id"]), outlook_gid)
+        self.assertIsNone(row["last_refresh_at"])
+        listed = next(account for account in client.get("/api/accounts").get_json()["accounts"] if account["id"] == account_id)
+        detail = client.get(f"/api/accounts/{account_id}").get_json()["account"]
+        for account in (listed, detail):
+            self.assertEqual(account["last_refresh_status"], "pending")
+            self.assertIsNone(account["last_refresh_error"])
+        self.assertNotEqual(row["refresh_token"], new_rt)
+        conn = self.module.create_sqlite_connection()
+        try:
+            logs = conn.execute(
+                "SELECT * FROM account_refresh_logs WHERE account_id = ? ORDER BY id", (account_id,)
+            ).fetchall()
+            self.assertEqual(logs[0]["status"], "failed")
+            self.assertEqual(logs[0]["error_message"], "old failure")
+            self.assertEqual(logs[-1]["refresh_type"], "credentials_updated")
+            self.assertEqual(logs[-1]["status"], "pending")
+            self.assertIsNone(logs[-1]["error_message"])
+        finally:
+            conn.close()
+        # Identical overwrite and explicit skip must preserve the latest evidence.
+        for strategy in ("overwrite", "skip"):
+            repeated = client.post(
+                "/api/accounts",
+                json={"provider": "auto", "duplicate_strategy": strategy,
+                      "account_string": f"{email_addr}----new_pw_{unique}----cid_{unique}----{new_rt}"},
+            )
+            self.assertTrue(repeated.get_json()["success"])
+        conn = self.module.create_sqlite_connection()
+        try:
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM account_refresh_logs WHERE account_id = ?", (account_id,)
+            ).fetchone()[0], len(logs))
+        finally:
+            conn.close()
 
     def test_export_selected_v2_includes_temp_mail_only_when_temp_group_selected(self):
         client = self.app.test_client()

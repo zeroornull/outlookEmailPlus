@@ -3293,6 +3293,7 @@ ${details}
                     document.getElementById('totalRefreshCount').textContent = stats.total;
                     document.getElementById('successRefreshCount').textContent = stats.success_count;
                     document.getElementById('failedRefreshCount').textContent = stats.failed_count;
+                    document.getElementById('pendingRefreshCount').textContent = stats.pending_count || 0;
 
                     console.log('统计数据已更新到页面');
                 }
@@ -3366,6 +3367,7 @@ ${details}
                             document.getElementById('totalRefreshCount').textContent = data.total;
                             document.getElementById('successRefreshCount').textContent = data.success_count;
                             document.getElementById('failedRefreshCount').textContent = data.failed_count;
+                            loadRefreshStats();
 
                             showToast(`${
                                 getUiLanguage() === 'en'
@@ -3669,11 +3671,11 @@ ${details}
                         listEl.innerHTML = `<div style="padding: 12px; background-color: #f8f9fa; border-bottom: 1px solid #e5e5e5; font-size: 13px; color: #666;">近半年刷新历史（共 ${data.logs.length} 条）</div>`;
                         let html = '';
                         data.logs.forEach(log => {
-                            const statusColor = log.status === 'success' ? '#28a745' : '#dc3545';
-                            const statusText = log.status === 'success' ? '成功' : '失败';
-                            const typeText = translateAppTextLocal(log.refresh_type === 'oauth_import' ? '授权导入' : (log.refresh_type === 'manual' ? '手动' : '自动'));
-                            const typeColor = log.refresh_type === 'manual' ? '#007bff' : '#28a745';
-                            const typeBgColor = log.refresh_type === 'manual' ? '#e7f3ff' : '#e8f5e9';
+                            const statusColor = log.status === 'success' ? 'var(--clr-jade)' : (log.status === 'pending' ? 'var(--text-muted)' : 'var(--clr-danger)');
+                            const statusText = translateAppTextLocal(log.status === 'success' ? '成功' : (log.status === 'pending' ? '待验证' : '失败'));
+                            const typeText = translateAppTextLocal(log.refresh_type === 'credentials_updated' ? '凭据更新' : (log.refresh_type === 'oauth_import' ? '授权导入' : (log.refresh_type === 'manual' ? '手动' : '自动')));
+                            const typeColor = log.refresh_type === 'credentials_updated' ? 'var(--text-muted)' : (log.refresh_type === 'manual' ? '#007bff' : '#28a745');
+                            const typeBgColor = log.refresh_type === 'credentials_updated' ? 'var(--bg-secondary)' : (log.refresh_type === 'manual' ? '#e7f3ff' : '#e8f5e9');
 
                             html += `
                                 <div style="padding: 14px; border-bottom: 1px solid #e5e5e5; transition: background-color 0.2s;"
@@ -3726,9 +3728,11 @@ ${details}
                                 const isSuccess = log.status === 'success';
                                 const statusBadge = isSuccess
                                     ? `<span class="badge" style="background:var(--clr-jade);color:white;">${translateAppTextLocal('成功')}</span>`
-                                    : `<span class="badge" style="background:var(--clr-danger);color:white;">${translateAppTextLocal('失败')}</span>`;
+                                    : log.status === 'pending'
+                                        ? `<span class="badge" style="color:var(--text-muted);">${translateAppTextLocal('待验证')}</span>`
+                                        : `<span class="badge" style="background:var(--clr-danger);color:white;">${translateAppTextLocal('失败')}</span>`;
                                 const typeText = translateAppTextLocal(
-                                    log.refresh_type === 'oauth_import' ? '授权导入' : (log.refresh_type === 'manual' ? '手动' : (log.refresh_type === 'scheduled' ? '定时' : (log.refresh_type || '-')))
+                                    log.refresh_type === 'credentials_updated' ? '凭据更新' : (log.refresh_type === 'oauth_import' ? '授权导入' : (log.refresh_type === 'manual' ? '手动' : (log.refresh_type === 'scheduled' ? '定时' : (log.refresh_type || '-'))))
                                 );
                                 return `
                                     <div style="padding:0.75rem 1rem;border-bottom:1px solid var(--border-light);display:flex;align-items:center;gap:0.8rem;">
@@ -4357,8 +4361,8 @@ ${details}
                 // 更新刷新状态徽章（如果存在）
                 const refreshBadge = card.querySelector('.refresh-status-badge, [data-refresh-status]');
                 if (refreshBadge) {
-                    refreshBadge.textContent = result === 'success' ? '✅' : '❌';
-                    refreshBadge.title = result === 'success' ? '刷新成功' : (errorMessage || '刷新失败');
+                    refreshBadge.textContent = result === 'success' ? '✅' : (result === 'pending' ? '⏳' : '❌');
+                    refreshBadge.title = result === 'success' ? '刷新成功' : (result === 'pending' ? translateAppTextLocal('待验证') : (errorMessage || '刷新失败'));
                 }
                 // 更新最后刷新时间（如果存在）
                 if (lastRefreshAt) {
