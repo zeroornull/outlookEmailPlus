@@ -16,14 +16,14 @@
 3. 在仓库根目录执行 server dry-run，再正式执行。以下是本次已部署镜像的可直接使用示例；下次更新替换为新 run 的 Pinned image。
 
 ```bash
-uv run --no-project --python 3.11 python scripts/deploy_k3s.py --image ghcr.io/zeroornull/outlook-email-plus@sha256:11397a151f21980f83a4bc8005cdf66134c18a508a97226120ddaabad54dcb53 --dry-run
-uv run --no-project --python 3.11 python scripts/deploy_k3s.py --image ghcr.io/zeroornull/outlook-email-plus@sha256:11397a151f21980f83a4bc8005cdf66134c18a508a97226120ddaabad54dcb53
+uv run --no-project --python 3.11 python scripts/deploy_k3s.py --image ghcr.io/zeroornull/outlook-email-plus@sha256:287186891f8bafcb1c74143fbd153bb2acde078e15b86768d86ee4e3a1d13e72 --dry-run
+uv run --no-project --python 3.11 python scripts/deploy_k3s.py --image ghcr.io/zeroornull/outlook-email-plus@sha256:287186891f8bafcb1c74143fbd153bb2acde078e15b86768d86ee4e3a1d13e72
 ```
 
 默认使用 `kubectl` 当前 context，脚本会先打印 context、namespace、Deployment、容器和新旧镜像。执行前核对这些信息。若要显式选择 context，给两条命令都加上 `--context`，例如当前环境的 context 名为 `default`：
 
 ```bash
-uv run --no-project --python 3.11 python scripts/deploy_k3s.py --context default --image ghcr.io/zeroornull/outlook-email-plus@sha256:11397a151f21980f83a4bc8005cdf66134c18a508a97226120ddaabad54dcb53 --dry-run
+uv run --no-project --python 3.11 python scripts/deploy_k3s.py --context default --image ghcr.io/zeroornull/outlook-email-plus@sha256:287186891f8bafcb1c74143fbd153bb2acde078e15b86768d86ee4e3a1d13e72 --dry-run
 ```
 
 其他参数默认值如下，目标环境不同时显式覆盖：
@@ -80,6 +80,19 @@ kubectl --context default -n dev get deployment outlook-email-plus -o jsonpath="
 | 健康检查 | <https://outlook-email-plus.173114.xyz/healthz>，返回 `status=ok` |
 
 当前 `/healthz` 的 `git_sha` / `build_time` 来自仓库历史 `.build-info`，其中 SHA 仍为旧值 `fc5844`；不要用它判定此次部署版本。脚本仅检查健康状态，版本以 Deployment 中固定的镜像 digest 核对，前端页脚可作辅助核对。
+
+## 2026-11-26 Token 自动导入部署
+
+| 项目 | 记录 |
+| --- | --- |
+| Git commit | `3c62e533cfffdd27dfed115b1fe65b7b7b44df09` |
+| Actions | [45852423011](https://github.com/zeroornull/outlookEmailPlus/actions/runs/45852423011)，SPA、amd64、arm64 与多架构合并全部成功 |
+| 镜像 | `ghcr.io/zeroornull/outlook-email-plus@sha256:287186891f8bafcb1c74143fbd153bb2acde078e15b86768d86ee4e3a1d13e72` |
+| 部署前备份 | `/app/data/outlook_accounts.db.20261126T154845685521Z-331a439598d6400e842139c6d0675df1.bak`，3080192 字节 |
+| 部署结果 | server dry-run、rollout、镜像 digest 核对通过；公网健康检查 HTTP 200、`status=ok` |
+| 验证 | OAuth 工具 88 项测试、SPA TypeScript 与旧前端 JavaScript 语法检查通过；线上新旧页面已显示自动导入入口，实际授权链接包含 `openid profile email` |
+
+完整 Microsoft 登录至自动写库的生产流程仍需账号持有人完成 Microsoft 登录与安全验证；本次未代替持有人完成新的授权。
 
 ## 每日 Token 刷新
 
