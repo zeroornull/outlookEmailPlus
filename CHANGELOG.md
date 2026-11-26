@@ -13,6 +13,7 @@ All notable changes to OutlookMail Plus are documented in this file.
 ### 优化 / Improvements
 
 - **CI 镜像构建提速**：amd64 与 arm64 使用原生 runner 并行构建后合并多架构镜像；前端使用固定版本 pnpm 与锁文件缓存依赖并在构建平台生成静态资源，Python 使用固定版本 uv 与锁文件同步项目虚拟环境，复用 BuildKit 依赖缓存以减少重复安装。
+- **k3s 手动部署流程**：新增固定镜像 digest 的部署脚本与中文记录，支持 server dry-run、SQLite 在线备份、rollout 和健康检查，并记录手动镜像回退步骤；Actions 继续负责镜像构建发布。
 
 ## [v2.9.11] - 2026-08-24
 

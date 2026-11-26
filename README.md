@@ -239,6 +239,17 @@ networks:
 - 本项目默认使用 SQLite + 持久卷，更新时建议保持**单实例**；若新旧实例短时并发访问同一数据库文件，启动阶段的迁移或文件锁等待可能导致健康检查超时
 - `TEMP_EMAIL_UPSTREAM_READ_FAILED` 与 `no healthy upstream` 需要分开理解：前者是临时邮箱上游读取失败，后者是入口层前面没有健康应用实例
 
+### k3s 更新现有部署
+
+此 fork 的 Actions 自动构建并发布镜像，集群更新需手动执行。安装 uv、kubectl 并配置好 kubeconfig 后，从成功构建的 Actions 摘要复制 Pinned image，在仓库根目录运行：
+
+```bash
+uv run --no-project --python 3.11 python scripts/deploy_k3s.py --image "registry/name@sha256:替换为64位摘要" --dry-run
+uv run --no-project --python 3.11 python scripts/deploy_k3s.py --image "registry/name@sha256:替换为64位摘要"
+```
+
+执行前核对脚本输出的当前 context；也可用 `--context` 显式指定。正式执行会在线备份 SQLite、更新固定 digest、等待 rollout 并检查健康状态。前提、参数、备份路径、手动回退及本次部署记录见 [k3s 部署记录](docs/k3s-deployment.md)。
+
 ### 本地运行
 
 先安装 [uv](https://docs.astral.sh/uv/getting-started/installation/)（CI 使用 `0.13.9`）。项目使用 Python 3.11，`uv sync` 会按 `.python-version` 创建或重建 `.venv`，无需手动激活；运行和开发依赖由 `pyproject.toml` 声明，`uv.lock` 锁定具体版本。
