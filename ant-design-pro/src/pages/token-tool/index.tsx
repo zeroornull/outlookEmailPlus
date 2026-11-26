@@ -182,6 +182,7 @@ const TokenToolPage: React.FC = () => {
         refresh_token: tokenResult.refresh_token,
         client_id:
           tokenResult.client_id || configForm.getFieldValue('client_id'),
+        scope: tokenResult.requested_scope || tokenResult.granted_scope || '',
       };
       if (saveMode === 'update') {
         if (!accountId) {
@@ -274,6 +275,8 @@ const TokenToolPage: React.FC = () => {
             <Typography.Paragraph type="secondary" style={{ marginTop: -8 }}>
               推荐优先使用 Graph 邮件预设（系统默认邮件读取主链路）；如需 IMAP
               协议请切换至 IMAP 预设。
+              仅支持个人 Microsoft 账号（tenant=consumers）。Web 应用由服务器按 Client ID
+              匹配 OAUTH_CLIENT_ID / OAUTH_CLIENT_SECRET；公共客户端可不配置 secret。
             </Typography.Paragraph>
             <Form.Item
               name="prompt_consent"

@@ -3,6 +3,7 @@ import { outlookRequest } from './request';
 export type TokenToolConfig = {
   client_id?: string;
   client_secret?: string;
+  client_secret_configured?: boolean;
   redirect_uri?: string;
   scope?: string;
   tenant?: string;
@@ -76,6 +77,7 @@ export async function saveTokenToAccount(body: {
   mode: 'update' | 'create' | string;
   refresh_token: string;
   client_id?: string;
+  scope?: string;
   account_id?: number | string;
   email?: string;
 }) {

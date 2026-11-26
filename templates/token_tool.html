@@ -14,7 +14,7 @@
         <header class="token-tool-header">
             <div>
                 <h1>🔑 OAuth Token 工具</h1>
-                <p>通过 Microsoft OAuth 获取 Token 并写入账号。支持个人 Microsoft 账号（Public Client、IMAP / Graph）。</p>
+                <p>通过 Microsoft OAuth 获取 Token 并写入账号。支持个人 Microsoft 账号（tenant=consumers、IMAP / Graph），可使用服务器配置的 Web 应用凭据或公共客户端。</p>
             </div>
             <button type="button" class="btn-inline ghost" onclick="window.close()">关闭</button>
         </header>
@@ -35,7 +35,7 @@
                         <ul>
                             <li>名称：自定义（如 "OutlookEmailPlus"）</li>
                             <li>受支持的账户类型：选择「<strong>Accounts in any organizational directory and personal Microsoft accounts</strong>」（任意目录 + 个人账号）</li>
-                            <li>⚠️ 不要选「仅个人 Microsoft accounts」，否则会触发 AADSTS9002331 错误</li>
+                            <li>工具仅支持个人 Microsoft 账号，授权使用 tenant=consumers。</li>
                         </ul>
                     </div>
                 </div>
@@ -43,9 +43,9 @@
                 <div class="guide-step">
                     <div class="guide-step-num">②</div>
                     <div class="guide-step-content">
-                        <strong>开启公共客户端流</strong>
-                        <p>进入应用 →「身份验证」→ 页面底部「高级设置」→ 将「允许公共客户端流」设为「是」。</p>
-                        <p class="token-field-hint" style="margin-top:4px;">⚠️ 这一步最容易遗漏！缺失会导致 <code>unauthorized_client</code> 错误。</p>
+                        <strong>选择客户端模式</strong>
+                        <p>Web 应用：在「证书和密码」创建客户端密码，将密码值与应用 ID 配对配置为服务器的 OAUTH_CLIENT_SECRET / OAUTH_CLIENT_ID。</p>
+                        <p class="token-field-hint" style="margin-top:4px;">公共客户端可不配置 secret；仅此模式按 Azure 要求开启「允许公共客户端流」。Web 应用无需开启此选项，secret 不会发送到浏览器。</p>
                     </div>
                 </div>
 
@@ -67,10 +67,10 @@
                     <div class="guide-step-num">④</div>
                     <div class="guide-step-content">
                         <strong>配置重定向 URI</strong>
-                        <p>在「身份验证」页面添加一个「Web」平台的重定向 URI，填入本工具页面的回调地址。</p>
+                        <p>在「身份验证」页面选择与客户端模式对应的平台，并将同一地址填入下方 Redirect URI。</p>
                         <ul>
-                            <li>本地部署：<code>http://localhost:5001/token-tool/callback</code>（端口号根据实际调整）</li>
-                            <li>Docker/远程部署：可填 <code>http://localhost</code>，授权后手动复制地址栏 URL 粘贴回本工具</li>
+                            <li>Web：使用「Web」平台，远程部署填写本服务的 HTTPS 回调地址，如 <code>https://example.com/token-tool/callback</code>；本地可使用实际 localhost 回调地址。</li>
+                            <li>公共客户端：使用「Mobile and desktop applications」平台的 public redirect，如 <code>http://localhost</code>，授权后手动复制地址栏 URL 粘贴回本工具。</li>
                         </ul>
                     </div>
                 </div>

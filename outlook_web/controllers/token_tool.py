@@ -42,10 +42,10 @@ def _ensure_oauth_tool_enabled() -> None:
 
 
 def _compatibility_mode_error(client_secret: str, tenant: str) -> str | None:
-    """兼容模式校验: 拒绝 client_secret 和非 consumers tenant (FD 收口说明)"""
+    """限制浏览器提交凭据及非个人账号 tenant。"""
     normalized_tenant = (tenant or COMPATIBLE_TENANT).strip() or COMPATIBLE_TENANT
     if client_secret:
-        return "兼容账号导入模式不支持 Client Secret，请使用公共客户端并保持 Client Secret 为空"
+        return "请通过服务器 OAUTH_CLIENT_ID/OAUTH_CLIENT_SECRET 配置匹配的应用凭据，浏览器中请保持 Client Secret 为空"
     if normalized_tenant != COMPATIBLE_TENANT:
         return "兼容账号导入模式仅支持 tenant=consumers，请使用与购买账号一致的个人 Microsoft 账号配置"
     return None
@@ -56,7 +56,8 @@ def _save_validation_guidance(error_msg: str) -> str | None:
     detail = (error_msg or "").lower()
     if "aadsts9002331" in detail or "/consumers endpoint" in detail:
         return "当前 Azure 应用被配置为仅 Personal Microsoft accounts，这会与系统现有的 /common 验证与运行模型冲突。请将 Supported account types 改为“Accounts in any identity provider or organizational directory and personal Microsoft accounts”。"
-    return None
+    guidance = oauth_tool_service.map_error_guidance(error_msg)
+    return guidance if "invalid_client" in detail or "aadsts70002" in detail or "aadsts700021" in detail else None
 
 
 @login_required
@@ -86,7 +87,7 @@ def prepare_oauth() -> Any:
 
     oauth_config = {
         "client_id": client_id,
-        "client_secret": "",
+        "client_secret": settings_repo.get_oauth_client_secret_for_client(client_id),
         "redirect_uri": redirect_uri,
         "scope": (data.get("scope") or "").strip(),
         "tenant": COMPATIBLE_TENANT,
@@ -345,12 +346,14 @@ def get_config() -> Any:
     scope_value = settings_repo.get_oauth_tool_scope()
     if scope_value == LEGACY_GRAPH_SCOPE:
         scope_value = app_config.get_oauth_scope_default()
+    client_id = settings_repo.get_oauth_tool_client_id()
     return jsonify(
         {
             "success": True,
             "data": {
-                "client_id": settings_repo.get_oauth_tool_client_id(),
+                "client_id": client_id,
                 "client_secret": "",
+                "client_secret_configured": bool(settings_repo.get_oauth_client_secret_for_client(client_id)),
                 "redirect_uri": settings_repo.get_oauth_tool_redirect_uri(),
                 "scope": scope_value,
                 "tenant": COMPATIBLE_TENANT,
@@ -370,8 +373,11 @@ def save_config() -> Any:
     if compatibility_error:
         return build_error_response("OAUTH_CONFIG_INVALID", compatibility_error, status=400)
 
-    settings_repo.set_setting("oauth_tool_client_id", (data.get("client_id") or "").strip())
-    settings_repo.set_setting("oauth_tool_client_secret", "")
+    client_id = (data.get("client_id") or "").strip()
+    # 历史 settings secret 只属于保存它时的 client ID；环境凭据由运行时独立解析。
+    if client_id != settings_repo.get_setting("oauth_tool_client_id", ""):
+        settings_repo.set_setting("oauth_tool_client_secret", "")
+    settings_repo.set_setting("oauth_tool_client_id", client_id)
     settings_repo.set_setting("oauth_tool_redirect_uri", (data.get("redirect_uri") or "").strip())
     settings_repo.set_setting("oauth_tool_scope", (data.get("scope") or "").strip())
     settings_repo.set_setting("oauth_tool_tenant", COMPATIBLE_TENANT)

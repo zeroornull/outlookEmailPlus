@@ -40,11 +40,13 @@ services:
       GUNICORN_WORKERS: "${GUNICORN_WORKERS:-1}"
       GUNICORN_THREADS: "${GUNICORN_THREADS:-8}"
       GUNICORN_TIMEOUT: "${GUNICORN_TIMEOUT:-120}"
-      # OAuth Token 工具（可选；如需显式覆盖，可在 .env 中配置下列变量）
-      # OAUTH_TOOL_ENABLED: "true"
-      # OAUTH_CLIENT_ID: ""
-      # OAUTH_CLIENT_SECRET: ""
-      # OAUTH_REDIRECT_URI: ""
+      # OAuth Token 工具：Web 应用在 .env 配对配置 ID 与密码值；Public Client 的 secret 可留空
+      OAUTH_TOOL_ENABLED: "${OAUTH_TOOL_ENABLED:-true}"
+      OAUTH_CLIENT_ID: "${OAUTH_CLIENT_ID:-}"
+      # 仅服务器使用，按精确 Client ID 用于交换、保存验证和 Graph / IMAP 刷新
+      OAUTH_CLIENT_SECRET: "${OAUTH_CLIENT_SECRET:-}"
+      # Web 平台填写本服务 HTTPS 回调；公共客户端使用 Mobile and desktop applications 的 public redirect
+      OAUTH_REDIRECT_URI: "${OAUTH_REDIRECT_URI:-}"
       # OAUTH_SCOPE: "offline_access https://outlook.office.com/IMAP.AccessAsUser.All"
       # Graph 仅为可选扩展："offline_access https://graph.microsoft.com/.default"
       # OAUTH_TENANT: "consumers"

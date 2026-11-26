@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+from pathlib import Path
 from typing import Any, Dict
+
+from flask import has_app_context
 
 from outlook_web import config
 from outlook_web.db import create_sqlite_connection, get_db
@@ -429,17 +433,41 @@ def get_oauth_tool_client_id() -> str:
     return config.get_oauth_client_id_default()
 
 
-def get_oauth_tool_client_secret() -> str:
-    """Settings 表（自动解密/兼容历史明文） → 环境变量 → 空字符串"""
-    value = get_setting("oauth_tool_client_secret")
-    if value:
-        if not value.startswith("enc:"):
-            return value
-        try:
-            return decrypt_data(value)
-        except Exception:
+def get_oauth_client_secret_for_client(client_id: str) -> str:
+    """仅返回与给定 Client ID 精确绑定的服务端凭据；环境配置优先。"""
+    if not client_id:
+        return ""
+
+    if client_id == config.get_oauth_client_id_default():
+        secret = config.get_oauth_client_secret_default()
+        if secret:
+            return secret
+
+    # 独立公共客户端脚本不应为了查询可选凭据而创建尚不存在的数据库。
+    if not has_app_context() and not Path(config.get_database_path()).is_file():
+        return ""
+
+    try:
+        if get_setting("oauth_tool_client_id") != client_id:
             return ""
-    return config.get_oauth_client_secret_default()
+        value = get_setting("oauth_tool_client_secret")
+    except sqlite3.OperationalError as exc:
+        # 未初始化的数据库没有可选 settings；其余数据库故障仍应暴露。
+        if str(exc) == "no such table: settings":
+            return ""
+        raise
+
+    if not value or not value.startswith("enc:"):
+        return value or ""
+    try:
+        return decrypt_data(value)
+    except RuntimeError:
+        return ""
+
+
+def get_oauth_tool_client_secret() -> str:
+    """读取当前工具 Client ID 精确绑定的服务端凭据。"""
+    return get_oauth_client_secret_for_client(get_oauth_tool_client_id())
 
 
 def get_oauth_tool_redirect_uri() -> str:

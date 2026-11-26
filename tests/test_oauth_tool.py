@@ -302,6 +302,31 @@ class OAuthToolErrorGuidanceTests(OAuthToolTestBase):
         self.assertIn("公共客户端流", guidance)
         self.assertIn("http://localhost", guidance)
 
+    def test_map_secret_errors(self):
+        from outlook_web.services.oauth_tool import map_error_guidance
+
+        self.assertIn("OAUTH_CLIENT_SECRET", map_error_guidance("AADSTS70002: client_secret required"))
+        self.assertIn("密钥值", map_error_guidance("invalid_client AADSTS7000215"))
+        self.assertIn("已过期", map_error_guidance("invalid_client AADSTS7000222"))
+
+    @patch("outlook_web.services.oauth_tool.requests.post")
+    def test_exchange_failure_redacts_reflected_secret(self, mock_post):
+        from outlook_web.services.oauth_tool import exchange_code_for_tokens
+
+        mock_post.return_value.status_code = 400
+        mock_post.return_value.json.return_value = {
+            "error": "invalid_client", "error_description": "Rejected reflected-secret",
+        }
+        with self.assertLogs("outlook_web.services.oauth_tool", level="WARNING") as logs:
+            result, error = exchange_code_for_tokens("code", {
+                "client_id": "cid", "client_secret": "reflected-secret",
+                "redirect_uri": "https://example.com/callback",
+                "scope": "offline_access https://graph.microsoft.com/.default",
+            }, "verifier")
+        self.assertIsNone(result)
+        self.assertNotIn("reflected-secret", json.dumps(error))
+        self.assertNotIn("reflected-secret", " ".join(logs.output))
+
     def test_map_invalid_grant(self):
         from outlook_web.services.oauth_tool import map_error_guidance
 
@@ -472,6 +497,33 @@ class OAuthToolTokenExchangeTests(OAuthToolTestBase):
 
 
 class OAuthToolApiPrepareTests(OAuthToolTestBase):
+    @patch.dict("os.environ", {"OAUTH_CLIENT_ID": "server-cid", "OAUTH_CLIENT_SECRET": "server-secret"})
+    @patch("outlook_web.services.oauth_tool.requests.post")
+    def test_http_flow_uses_only_matching_server_secret(self, mock_post):
+        from urllib.parse import parse_qs, urlparse
+
+        mock_post.return_value.status_code = 200
+        mock_post.return_value.json.return_value = {"access_token": "at", "refresh_token": "rt"}
+        with self.app.test_client() as client:
+            self._login(client)
+            for client_id, expected_secret in (("server-cid", "server-secret"), ("other-cid", None)):
+                response = client.post("/api/token-tool/prepare", json={
+                    "client_id": client_id, "client_secret": "",
+                    "redirect_uri": "https://example.com/token-tool/callback",
+                    "scope": "offline_access https://outlook.office.com/IMAP.AccessAsUser.All",
+                })
+                self.assertEqual(response.status_code, 200)
+                self.assertNotIn("server-secret", response.get_data(as_text=True))
+                state = parse_qs(urlparse(response.get_json()["data"]["authorize_url"]).query)["state"][0]
+                with client.session_transaction() as cookie_session:
+                    self.assertNotIn("server-secret", json.dumps(dict(cookie_session)))
+                exchanged = client.post("/api/token-tool/exchange", json={
+                    "callback_url": f"https://example.com/token-tool/callback?code=code&state={state}",
+                })
+                self.assertEqual(exchanged.status_code, 200)
+                self.assertEqual(mock_post.call_args.kwargs["data"].get("client_secret"), expected_secret)
+                self.assertNotIn("server-secret", exchanged.get_data(as_text=True))
+
     def test_prepare_returns_auth_url(self):
         from urllib.parse import parse_qs, urlparse
 
@@ -525,7 +577,7 @@ class OAuthToolApiPrepareTests(OAuthToolTestBase):
                 },
             )
             self.assertEqual(resp.status_code, 400)
-            self.assertIn("不支持 Client Secret", resp.get_json().get("message", ""))
+            self.assertIn("OAUTH_CLIENT_ID/OAUTH_CLIENT_SECRET", resp.get_json().get("message", ""))
 
     def test_prepare_rejects_non_consumers_tenant(self):
         with self.app.test_client() as client:
@@ -723,12 +775,41 @@ class OAuthToolApiConfigTests(OAuthToolTestBase):
             self.assertEqual(data.get("data", {}).get("client_secret"), "")
             self.assertEqual(data.get("data", {}).get("tenant"), "consumers")
 
+    @patch.dict("os.environ", {"OAUTH_CLIENT_ID": "server-cid", "OAUTH_CLIENT_SECRET": "server-secret"})
+    def test_config_reports_server_secret_without_disclosing_it(self):
+        with self.app.test_client() as client:
+            self._login(client)
+            response = client.get("/api/token-tool/config")
+            self.assertEqual(response.status_code, 200)
+            config = response.get_json()["data"]
+            self.assertEqual(config["client_id"], "server-cid")
+            self.assertTrue(config["client_secret_configured"])
+            self.assertEqual(config["client_secret"], "")
+            self.assertEqual(config["tenant"], "consumers")
+            self.assertNotIn("server-secret", response.get_data(as_text=True))
+
+    def test_config_preserves_legacy_secret_only_for_same_client(self):
+        from outlook_web.repositories import settings as settings_repo
+
+        with self.app.app_context():
+            settings_repo.set_setting("oauth_tool_client_id", "legacy-cid")
+            settings_repo.set_setting("oauth_tool_client_secret", "legacy-secret")
+        with self.app.test_client() as client:
+            self._login(client)
+            self.assertEqual(self._save_oauth_config(client, client_id="legacy-cid").status_code, 200)
+            with self.app.app_context():
+                self.assertEqual(settings_repo.get_oauth_client_secret_for_client("legacy-cid"), "legacy-secret")
+            self.assertEqual(self._save_oauth_config(client, client_id="different-cid").status_code, 200)
+            with self.app.app_context():
+                self.assertEqual(settings_repo.get_oauth_client_secret_for_client("different-cid"), "")
+                self.assertEqual(settings_repo.get_setting("oauth_tool_client_secret"), "")
+
     def test_config_save_rejects_client_secret(self):
         with self.app.test_client() as client:
             self._login(client)
             resp = self._save_oauth_config(client, client_secret="super-secret-value")
             self.assertEqual(resp.status_code, 400)
-            self.assertIn("不支持 Client Secret", resp.get_json().get("message", ""))
+            self.assertIn("OAUTH_CLIENT_ID/OAUTH_CLIENT_SECRET", resp.get_json().get("message", ""))
 
     def test_config_save_rejects_non_consumers_tenant(self):
         with self.app.test_client() as client:
@@ -856,6 +937,28 @@ class OAuthToolApiSaveTests(OAuthToolTestBase):
             self.assertIsNotNone(acc)
             self.assertEqual(acc["client_id"], "new-cid")
             self.assertEqual(acc["refresh_token"], "new-rt")
+
+    @patch.dict("os.environ", {"OAUTH_CLIENT_ID": "server-cid", "OAUTH_CLIENT_SECRET": "server-secret"})
+    @patch("outlook_web.services.graph.requests.post")
+    def test_save_validation_sends_server_secret_and_preserves_scope(self, mock_post):
+        mock_post.return_value.status_code = 200
+        mock_post.return_value.json.return_value = {"access_token": "at", "refresh_token": "rotated-rt"}
+        scope = "offline_access https://outlook.office.com/IMAP.AccessAsUser.All"
+        with self.app.test_client() as client:
+            self._login(client)
+            response = client.post("/api/token-tool/save", json={
+                "mode": "create", "email": "server-refresh@oauth-test.com",
+                "client_id": "server-cid", "refresh_token": "rt", "scope": scope,
+            })
+            self.assertEqual(response.status_code, 200)
+            payload = mock_post.call_args.kwargs["data"]
+            self.assertEqual(payload["client_secret"], "server-secret")
+            self.assertEqual(payload["scope"], scope)
+            self.assertNotIn("server-secret", response.get_data(as_text=True))
+        with self.app.app_context():
+            from outlook_web.repositories import accounts as accounts_repo
+
+            self.assertEqual(accounts_repo.get_account_by_email("server-refresh@oauth-test.com")["refresh_token"], "rotated-rt")
 
     @patch("outlook_web.services.graph.test_refresh_token_with_rotation")
     def test_save_validates_refresh_token(self, mock_test_rt):
@@ -1007,7 +1110,7 @@ class OAuthToolApiSaveTests(OAuthToolTestBase):
                 },
             )
             self.assertEqual(resp.status_code, 400)
-            self.assertIn("不支持 Client Secret", resp.get_json().get("message", ""))
+            self.assertIn("OAUTH_CLIENT_ID/OAUTH_CLIENT_SECRET", resp.get_json().get("message", ""))
 
         mock_test_rt.assert_not_called()
 
@@ -1175,15 +1278,20 @@ class OAuthToolSettingsCompatTests(OAuthToolTestBase):
         with self.app.app_context():
             from outlook_web.repositories import settings as settings_repo
 
+            settings_repo.set_setting("oauth_tool_client_id", "legacy-cid")
             settings_repo.set_setting("oauth_tool_client_secret", "legacy-plain-secret")
             self.assertEqual(
                 settings_repo.get_oauth_tool_client_secret(),
                 "legacy-plain-secret",
             )
+            self.assertEqual(settings_repo.get_oauth_client_secret_for_client("legacy-cid"), "legacy-plain-secret")
+            self.assertEqual(settings_repo.get_oauth_client_secret_for_client("different-cid"), "")
 
     def test_oauth_tool_client_secret_returns_empty_for_invalid_encrypted_value(self):
         with self.app.app_context():
             from outlook_web.repositories import settings as settings_repo
 
+            settings_repo.set_setting("oauth_tool_client_id", "legacy-cid")
             settings_repo.set_setting("oauth_tool_client_secret", "enc:not-a-valid-token")
             self.assertEqual(settings_repo.get_oauth_tool_client_secret(), "")
+            self.assertEqual(settings_repo.get_oauth_client_secret_for_client("legacy-cid"), "")

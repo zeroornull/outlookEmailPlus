@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from outlook_web.errors import build_error_payload
+from outlook_web.repositories import settings as settings_repo
 from outlook_web.services.http import get_response_details
 
 # Token 端点
@@ -34,17 +35,16 @@ def get_access_token_graph_result(client_id: str, refresh_token: str, proxy_url:
     """获取 Graph API access_token（包含错误详情）"""
     try:
         proxies = build_proxies(proxy_url)
-        res = requests.post(
-            TOKEN_URL_GRAPH,
-            data={
-                "client_id": client_id,
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-                "scope": DEFAULT_GRAPH_SCOPE,
-            },
-            timeout=30,
-            proxies=proxies,
-        )
+        data = {
+            "client_id": client_id,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "scope": DEFAULT_GRAPH_SCOPE,
+        }
+        client_secret = settings_repo.get_oauth_client_secret_for_client(client_id)
+        if client_secret:
+            data["client_secret"] = client_secret
+        res = requests.post(TOKEN_URL_GRAPH, data=data, timeout=30, proxies=proxies)
 
         if res.status_code != 200:
             details = get_response_details(res)
@@ -282,6 +282,9 @@ def test_refresh_token_with_rotation(
         "refresh_token": refresh_token,
         "scope": resolved_scope,
     }
+    client_secret = settings_repo.get_oauth_client_secret_for_client(client_id)
+    if client_secret:
+        data["client_secret"] = client_secret
 
     last_error_msg = None
     for attempt in range(max_retries + 1):

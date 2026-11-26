@@ -154,11 +154,16 @@ def exchange_code_for_tokens(code: str, oauth_config: Dict[str, Any], verifier: 
     try:
         resp = requests.post(token_url, data=payload, timeout=15)
     except requests.RequestException as exc:
-        logger.error("[oauth_tool] Token 换取网络错误: %s", exc)
-        return None, f"无法连接 Microsoft 服务器: {exc}"
+        error_detail = str(exc)
+        if payload.get("client_secret"):
+            error_detail = error_detail.replace(payload["client_secret"], "[REDACTED]")
+        logger.error("[oauth_tool] Token 换取网络错误: %s", error_detail)
+        return None, f"无法连接 Microsoft 服务器: {error_detail}"
 
     if resp.status_code != 200:
         error_detail = _parse_error_response(resp)
+        if payload.get("client_secret"):
+            error_detail = error_detail.replace(payload["client_secret"], "[REDACTED]")
         guidance = map_error_guidance(error_detail)
         logger.warning("[oauth_tool] Token 换取失败: %s", error_detail[:200])
         return None, {"message": error_detail, "guidance": guidance}
@@ -232,7 +237,7 @@ ERROR_GUIDANCE_MAP = {
     "redirect_uri_mismatch": "回调地址不匹配，请确认 Azure 门户中注册的重定向 URI 与当前填写的一致",
     "interaction_required": "请勾选『强制 Consent』后重新授权",
     "consent_required": "此权限需要组织管理员同意，请联系 IT 管理员或切换为个人账号",
-    "invalid_client": "Azure 仍将当前应用视为需要 client_secret 的机密客户端；请确认已开启『允许公共客户端流』，若仍报错请改用 Mobile and desktop applications 平台的 public redirect URI（如 http://localhost）并走手动粘贴回调 URL",
+    "invalid_client": "请在服务器配置与当前 Client ID 匹配的 OAUTH_CLIENT_ID/OAUTH_CLIENT_SECRET（client_secret），并检查密钥值及有效期；也可开启『允许公共客户端流』，改用 Mobile and desktop applications 的 public redirect URI（如 http://localhost）并手动粘贴回调 URL",
     "access_denied": "用户拒绝了授权请求，请重新点击『登录 Microsoft』",
 }
 
@@ -240,6 +245,12 @@ ERROR_GUIDANCE_MAP = {
 def map_error_guidance(error_detail: str) -> str:
     """根据错误信息匹配中文引导建议"""
     detail_lower = error_detail.lower() if isinstance(error_detail, str) else ""
+    if "aadsts7000215" in detail_lower:
+        return "应用密钥无效，请检查服务器 OAUTH_CLIENT_SECRET 是否为当前应用的密钥值（不是密钥 ID）"
+    if "aadsts7000222" in detail_lower:
+        return "应用密钥已过期，请在 Azure 创建新密钥并更新服务器 OAUTH_CLIENT_SECRET"
+    if "aadsts70002" in detail_lower:
+        return ERROR_GUIDANCE_MAP["invalid_client"]
     for key, guidance in ERROR_GUIDANCE_MAP.items():
         if key in detail_lower:
             return guidance

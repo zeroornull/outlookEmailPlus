@@ -74,10 +74,11 @@ OutlookMail Plus 是一款面向个人与团队的注册邮箱管理器。
 ### v1.15.0–v1.16.0 — OAuth Token 获取工具
 
 - 新增独立 Token 工具窗口，以**兼容账号导入模式**获取 Microsoft refresh token
-- 当前模式固定面向个人 Microsoft 账号：Public Client、`tenant=consumers`、不支持 `client_secret`
+- 当前工具面向个人 Microsoft 账号，固定 `tenant=consumers`；支持服务器配置 secret 的 Web 应用，也支持 secret 为空的 Public Client
 - Azure 应用注册的 **Supported account types** 应选择 **Accounts in any identity provider or organizational directory and personal Microsoft accounts**；仅组织目录会报 `unauthorized_client`，而 **Personal Microsoft accounts only** 会在写入前 `/common` 验证阶段报 `AADSTS9002331`
 - 如果 Azure 门户在切换 Supported account types 时提示 `Property api.requestedAccessTokenVersion is invalid`，请到 **Manifest** 中把 `api.requestedAccessTokenVersion` 改为 `2`
-- 如果已经开启 Public Client 仍然报"必须包含 `client_secret`"，说明当前回调仍被 Azure 视为机密 Web 客户端；此时应改用 **Mobile and desktop applications** 平台的 public redirect（如 `http://localhost`），并在工具里走手动粘贴回调 URL
+- Web 应用：在 Azure 的 **Web** 平台注册本服务的 HTTPS 回调地址，并在服务器配对设置 `OAUTH_CLIENT_ID` / `OAUTH_CLIENT_SECRET`（使用密码值，而非密码 ID）。无需开启公共客户端流。此 fork 修复了服务器 secret 未参与交换的问题，授权码交换、保存前验证和后续 Graph / IMAP 刷新均按精确 Client ID 使用服务器凭据；secret 不回传浏览器。
+- Public Client：secret 可留空，使用 **Mobile and desktop applications** 平台的 public redirect（如 `http://localhost`），按 Azure 要求开启公共客户端流，并在工具里手动粘贴回调 URL。若 Web 回调报“必须包含 client_secret”，请检查服务器配置的应用 ID 与工具、账号的 Client ID 是否一致，以及 secret 是否有效。
 - 如果遇到 `AADSTS70000`（scope 未授权/失效），优先检查"授权时 scope"和"验证时 scope"是否一致，并重新执行一次 **强制 Consent** 授权
 - Graph 场景建议最小权限：**offline_access + Mail.Read + User.Read**；如需 IMAP 再额外补 **Office 365 Exchange Online → IMAP.AccessAsUser.All**
 - 支持 Graph / IMAP Scope 预设、错误引导、JWT audience/scope 诊断；前端默认推荐 **Graph 邮件预设**（后端环境变量 fallback 保持 IMAP 兼容 Scope）
@@ -271,7 +272,7 @@ python -m unittest discover -s tests -v
 - `OAUTH_CLIENT_ID`
   Outlook OAuth 应用 ID
 - `OAUTH_CLIENT_SECRET`
-  兼容导入模式下应保持为空；如 Azure 应用依赖 `client_secret`，则不属于当前支持范围
+  Web 应用的客户端密码值，仅在服务器配置，并与 `OAUTH_CLIENT_ID` 精确匹配；用于授权码交换、保存前验证及 Graph / IMAP 刷新。Public Client 可留空。修改此配对后，旧 Client ID 的账号需保留对应的服务器凭据才能继续刷新
 - `OAUTH_REDIRECT_URI`
   Outlook OAuth 回调地址
 - `OAUTH_SCOPE`

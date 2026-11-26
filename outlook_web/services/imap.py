@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from outlook_web.errors import build_error_payload
+from outlook_web.repositories import settings as settings_repo
 from outlook_web.services.graph import get_access_token_graph
 from outlook_web.services.http import get_response_details
 
@@ -245,16 +246,16 @@ def get_access_token_imap_result(client_id: str, refresh_token: str) -> Dict[str
                 return {"success": True, "access_token": access_token}
 
     try:
-        res = requests.post(
-            TOKEN_URL_IMAP,
-            data={
-                "client_id": client_id,
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-                "scope": "https://outlook.office.com/IMAP.AccessAsUser.All offline_access",
-            },
-            timeout=30,
-        )
+        data = {
+            "client_id": client_id,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "scope": "https://outlook.office.com/IMAP.AccessAsUser.All offline_access",
+        }
+        client_secret = settings_repo.get_oauth_client_secret_for_client(client_id)
+        if client_secret:
+            data["client_secret"] = client_secret
+        res = requests.post(TOKEN_URL_IMAP, data=data, timeout=30)
 
         if res.status_code != 200:
             details = get_response_details(res)

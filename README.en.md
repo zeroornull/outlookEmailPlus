@@ -70,9 +70,11 @@ The `browser-extension/` directory contains a Chrome/Edge Manifest V3 extension.
 ### v1.15.0–v1.16.0 — OAuth Token Tool
 
 - Added a dedicated popup-style token tool for **compatibility-mode account import**
-- The supported contract is now fixed to personal Microsoft accounts: Public Client, `tenant=consumers`, and no `client_secret`
+- The tool supports personal Microsoft accounts with `tenant=consumers`, using either a Web app with server-configured credentials or a Public Client with no secret
 - The Azure app registration should use **Accounts in any identity provider or organizational directory and personal Microsoft accounts**; org-only apps fail with `unauthorized_client`, while **Personal Microsoft accounts only** conflicts with the current `/common` validation/runtime model and can fail with `AADSTS9002331`
 - If Azure blocks the audience change with `Property api.requestedAccessTokenVersion is invalid`, update `api.requestedAccessTokenVersion` to `2` in the **Manifest** first
+- For a Web app, register this service's HTTPS callback under Azure's **Web** platform and set the matching `OAUTH_CLIENT_ID` / `OAUTH_CLIENT_SECRET` on the server (use the secret value, not its ID). Public client flows need not be enabled. This fork fixes the missing server secret during exchange: authorization-code exchange, validation before saving, and subsequent Graph / IMAP refreshes resolve credentials by exact Client ID. The secret is never returned to the browser.
+- For a Public Client, leave the secret empty, use a **Mobile and desktop applications** public redirect such as `http://localhost`, enable public client flows as required by Azure, and paste the callback URL into the tool. If a Web callback requires `client_secret`, check that the tool and account Client IDs match the server configuration and that the secret is valid.
 - If you hit `AADSTS70000` (unauthorized/expired scope), first verify that the scope used during consent matches the scope used during validation, then run a fresh **forced-consent** authorization
 - Recommended minimum Graph delegated permissions: **offline_access + Mail.Read + User.Read**; add **Office 365 Exchange Online → IMAP.AccessAsUser.All** only when IMAP is required
 - Supports Graph / IMAP scope presets, error guidance, and JWT audience/scope diagnostics; the frontend now recommends the **Graph mail preset** by default (backend env fallback remains IMAP-compatible)
@@ -266,7 +268,7 @@ python -m unittest discover -s tests -v
 - `OAUTH_CLIENT_ID`
   Outlook OAuth application ID
 - `OAUTH_CLIENT_SECRET`
-  Must remain empty in compatibility mode; Azure apps that require a `client_secret` are outside the supported contract
+  Web app secret value, configured only on the server and matched exactly to `OAUTH_CLIENT_ID`; used for code exchange, validation before saving, and Graph / IMAP refreshes. Leave empty for a Public Client. After changing this pair, accounts using the previous Client ID still need matching server credentials to refresh
 - `OAUTH_REDIRECT_URI`
   Outlook OAuth callback URL
 - `OAUTH_SCOPE`
