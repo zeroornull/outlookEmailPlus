@@ -57,7 +57,10 @@ class TestOverviewApiContract(unittest.TestCase):
             "kpi",
         ):
             self.assertIn(key, data)
-        self.assertIn("total", data["account_status"])
+        counts = data["account_status"]
+        self.assertEqual(set(counts), {"total", "active", "expired", "pending_refresh", "error", "disabled"})
+        self.assertTrue(all(isinstance(value, int) for value in counts.values()))
+        self.assertEqual(counts["total"], sum(value for key, value in counts.items() if key != "total"))
 
     def test_overview_other_tabs_return_objects(self):
         for path in (

@@ -57,10 +57,32 @@ def get_overview_summary(conn: sqlite3.Connection | None = None) -> Dict[str, An
     # 概览大盘入口：聚合账号状态、邮箱池快照、刷新健康度、今日 KPI，供前端 dashboard 一次性加载
     db = _db(conn)
 
+    # 按账号索引查找最新日志 id；时间戳相同时仍由插入顺序确定健康状态。
     account_rows = db.execute("""
-        SELECT COALESCE(status, '') AS status, COUNT(*) AS cnt
-        FROM accounts
-        GROUP BY COALESCE(status, '')
+        WITH health AS (
+            SELECT CASE
+                WHEN lower(trim(COALESCE(a.status, ''))) IN ('disabled', 'inactive') THEN 'disabled'
+                WHEN lower(trim(COALESCE(a.status, ''))) = 'expired' THEN 'expired'
+                WHEN lower(trim(COALESCE(a.status, ''))) IN ('pending_refresh', 'refresh_required') THEN 'pending_refresh'
+                WHEN lower(trim(COALESCE(a.status, ''))) IN ('error', 'failed') THEN 'error'
+                WHEN lower(trim(COALESCE(a.status, ''))) != 'active' THEN 'error'
+                WHEN lower(COALESCE(NULLIF(trim(a.account_type), ''), 'outlook')) != 'outlook'
+                  OR lower(COALESCE(NULLIF(trim(a.provider), ''), 'outlook')) != 'outlook' THEN 'active'
+                WHEN lower(trim(COALESCE(r.status, ''))) = 'success' THEN 'active'
+                WHEN lower(trim(COALESCE(r.status, ''))) IN ('failed', 'error') THEN
+                    CASE WHEN lower(COALESCE(r.error_message, '')) LIKE '%invalid_grant%'
+                           OR lower(COALESCE(r.error_message, '')) LIKE '%aadsts70000%'
+                         THEN 'expired' ELSE 'error' END
+                WHEN r.id IS NULL AND trim(COALESCE(a.last_refresh_at, '')) != '' THEN 'active'
+                ELSE 'pending_refresh'
+            END AS status
+            FROM accounts AS a
+            LEFT JOIN account_refresh_logs AS r ON r.id = (
+                SELECT id FROM account_refresh_logs
+                WHERE account_id = a.id ORDER BY id DESC LIMIT 1
+            )
+        )
+        SELECT status, COUNT(*) AS cnt FROM health GROUP BY status
         """).fetchall()
     account_status = {
         "total": 0,
@@ -68,19 +90,13 @@ def get_overview_summary(conn: sqlite3.Connection | None = None) -> Dict[str, An
         "expired": 0,
         "pending_refresh": 0,
         "error": 0,
+        "disabled": 0,
     }
     for row in account_rows:
         status = str(row["status"] or "").strip().lower()
         count = int(row["cnt"] or 0)
         account_status["total"] += count
-        if status == "active":
-            account_status["active"] += count
-        elif status in {"expired", "inactive", "disabled"}:
-            account_status["expired"] += count
-        elif status in {"pending_refresh", "refresh_required"}:
-            account_status["pending_refresh"] += count
-        elif status in {"error", "failed"}:
-            account_status["error"] += count
+        account_status[status] += count
 
     pool_rows = db.execute("""
         SELECT COALESCE(pool_status, '') AS pool_status, COUNT(*) AS cnt

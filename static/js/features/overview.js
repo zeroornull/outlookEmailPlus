@@ -214,7 +214,7 @@ function renderOverviewSummary(data) {
 
     container.innerHTML = `
         <div class="kpi-row">
-            ${renderKpiCard('总账号数', formatNumber(accountStatus.total || 0), ovLabelValue('活跃', formatNumber(accountStatus.active || 0)), 'kpi-primary', '快速观察账号池总体规模，以及当前真正处于活跃状态的账号占比。')}
+            ${renderKpiCard('总账号数', formatNumber(accountStatus.total || 0), ovLabelValue('活跃', formatNumber(accountStatus.active || 0)), 'kpi-primary', 'Outlook 按最新令牌刷新结果判断；普通 IMAP 按启用状态统计，未验证连接。')}
             ${renderKpiCard('邮箱池可用', formatNumber(pool.available || 0), ovLabelValue('占用', formatNumber(pool.in_use || 0)), 'kpi-success', '这张卡片更适合盯实时供给，避免申领高峰时可用量突然见底。')}
             ${renderKpiCard('今日验证码提取', formatNumber(kpi.verification_extracted || 0), ovLabelValue('临时邮箱', formatNumber(kpi.temp_emails_active || 0)), 'kpi-accent', '用来快速判断今天验证链路的真实活跃度，以及临时邮箱侧是否同步跟上。')}
             ${renderKpiCard('最近刷新成功率', formatPercent(refresh.success_rate_7d || 0), ovLabelValue('失败', formatNumber(refresh.last_fail_count || 0)), 'kpi-warn', '当这张卡片连续下滑时，优先检查刷新任务、凭据有效性和网络稳定性。')}
@@ -224,13 +224,14 @@ function renderOverviewSummary(data) {
                 title: '账号状态分布',
                 icon: '◔',
                 badge: '实时',
-                hoverNote: '重点看待刷新与异常是否持续抬头，避免问题在账号层面积压。',
+                hoverNote: '授权过期的账号需重新授权；刷新异常请查看刷新日志。',
                 body: renderProgressBlock([
                     { label: '活跃', value: accountStatus.active || 0, total: accountStatus.total || 0, tone: 'jade' },
-                    { label: '过期', value: accountStatus.expired || 0, total: accountStatus.total || 0, tone: 'danger' },
-                    { label: '待刷新', value: accountStatus.pending_refresh || 0, total: accountStatus.total || 0, tone: 'warn' },
-                    { label: '异常', value: accountStatus.error || 0, total: accountStatus.total || 0, tone: 'primary' }
-                ])
+                    { label: '授权过期 / 需重新授权', value: accountStatus.expired || 0, total: accountStatus.total || 0, tone: 'danger' },
+                    { label: '待验证', value: accountStatus.pending_refresh || 0, total: accountStatus.total || 0, tone: 'warn' },
+                    { label: '刷新异常', value: accountStatus.error || 0, total: accountStatus.total || 0, tone: 'primary' },
+                    { label: '已停用', value: accountStatus.disabled || 0, total: accountStatus.total || 0, tone: 'primary' }
+                ]) + `<p style="color: var(--text-muted); font-size: 12px; margin: 12px 0 0;">${esc(ovT('Outlook 按最新令牌刷新结果判断；普通 IMAP 按启用状态统计，未验证连接。'))}</p>`
             })}
             ${renderDataCard({
                 title: '邮箱池快照',

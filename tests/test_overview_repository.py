@@ -9,6 +9,7 @@ TDD C 层：Overview Repository 查询测试
 """
 
 import time
+import sqlite3
 import unittest
 
 from tests._import_app import import_web_app_module
@@ -78,8 +79,8 @@ class OverviewSummaryRepositoryTests(OverviewRepositoryBaseTests):
             for i in range(2):
                 db.execute(
                     """
-                    INSERT INTO accounts (email, client_id, refresh_token, status, account_type, provider)
-                    VALUES (?, 'cid', 'rt', 'active', 'outlook', 'outlook')
+                    INSERT INTO accounts (email, client_id, refresh_token, status, account_type, provider, last_refresh_at)
+                    VALUES (?, 'cid', 'rt', 'active', 'outlook', 'outlook', CURRENT_TIMESTAMP)
                     """,
                     (f"ov_test_{i}@summary.test",),
                 )
@@ -102,6 +103,65 @@ class OverviewSummaryRepositoryTests(OverviewRepositoryBaseTests):
             pool = result.get("pool_snapshot", {})
             for key in ("available", "in_use", "cooldown", "total"):
                 self.assertIn(key, pool, f"pool_snapshot 缺少键: {key}")
+
+    def test_effective_health_is_exhaustive_and_latest_id_wins(self):
+        from outlook_web.db import get_db
+        from outlook_web.repositories.overview import get_overview_summary
+
+        with self.app.app_context():
+            db = sqlite3.connect(":memory:")
+            self.addCleanup(db.close)
+            db.row_factory = sqlite3.Row
+            get_db().backup(db)
+        db.execute("DELETE FROM account_refresh_logs")
+        db.execute("DELETE FROM accounts")
+
+        def account(status="active", kind="outlook", provider="outlook", refreshed=None):
+            return db.execute(
+                "INSERT INTO accounts (email, client_id, refresh_token, status, account_type, provider, last_refresh_at) "
+                "VALUES (?, 'cid', 'rt', ?, ?, ?, ?)",
+                (f"health-{db.total_changes}@example.test", status, kind, provider, refreshed),
+            ).lastrowid
+
+        def log(account_id, status, error=None):
+            db.execute(
+                "INSERT INTO account_refresh_logs (account_id, account_email, status, error_message, created_at) "
+                "VALUES (?, 'health@example.test', ?, ?, '2026-01-01 00:00:00')",
+                (account_id, status, error),
+            )
+
+        expired = account(" ACTIVE ", None, "  ", "2025-01-01")
+        log(expired, "success")
+        log(expired, " FAILED ", "INVALID_GRANT: token revoked")
+        db.execute("UPDATE accounts SET updated_at = '2099-01-01' WHERE id = ?", (expired,))
+        recovered = account()
+        log(recovered, "failed", "AADSTS70000")
+        log(recovered, " SUCCESS ")
+        aadsts = account()
+        log(aadsts, "failed", "aadsts70000")
+        disabled = account(" InAcTiVe ")
+        log(disabled, "failed", "invalid_grant")
+        account("disabled")
+        account("expired")
+        account("refresh_required")
+        account(" PENDING_REFRESH ")
+        account(refreshed="   ")
+        account(refreshed="2026-01-01")
+        generic = account(kind=" IMAP ")
+        log(generic, "failed", "invalid_grant")
+        account(provider="other")
+        account("failed")
+        account(" ERROR ")
+        account(None)
+        account("unknown")
+        failure = account()
+        log(failure, "failed", "network timeout")
+        unknown_log = account()
+        log(unknown_log, "unknown")
+        result = get_overview_summary(db)["account_status"]
+        self.assertEqual(result, {"total": 18, "active": 4, "expired": 3,
+                                  "pending_refresh": 4, "error": 5, "disabled": 2})
+        self.assertEqual(result["total"], sum(value for key, value in result.items() if key != "total"))
 
 
 class OverviewVerificationStatsRepositoryTests(OverviewRepositoryBaseTests):

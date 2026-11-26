@@ -236,8 +236,8 @@ def _upsert_token_account(email: str | None, client_id: str, refresh_token: str,
             db.rollback()
             return None, ("ACCOUNT_NOT_FOUND", "账号不存在", 404)
         if existing and (
-            (existing.get("account_type") or "outlook").strip().lower() != "outlook"
-            or (existing.get("provider") or "outlook").strip().lower() != "outlook"
+            (str(existing.get("account_type") or "").strip().lower() or "outlook") != "outlook"
+            or (str(existing.get("provider") or "").strip().lower() or "outlook") != "outlook"
         ):
             db.rollback()
             return None, ("OAUTH_ACCOUNT_CONFLICT", "该邮箱已属于其他类型或服务商的账号，无法覆盖凭据", 409)
@@ -259,6 +259,12 @@ def _upsert_token_account(email: str | None, client_id: str, refresh_token: str,
                 return None, ("INTERNAL_ERROR", "创建账号失败，请检查数据库后重新授权", 500)
             account_id = db.execute("SELECT id FROM accounts WHERE email = ?", (email,)).fetchone()["id"]
             action = "created"
+        db.execute("UPDATE accounts SET last_refresh_at = CURRENT_TIMESTAMP WHERE id = ?", (account_id,))
+        db.execute(
+            "INSERT INTO account_refresh_logs (account_id, account_email, refresh_type, status) "
+            "VALUES (?, ?, 'oauth_import', 'success')",
+            (account_id, email),
+        )
         db.commit()
     except Exception:
         if db is not None:

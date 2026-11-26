@@ -10,6 +10,7 @@ All notable changes to OutlookMail Plus are documented in this file.
 - **Fork OAuth Web 应用凭据修复**：服务器按精确 Client ID 解析 `OAUTH_CLIENT_ID` / `OAUTH_CLIENT_SECRET`，用于授权码交换、账号保存前验证及后续 Graph / IMAP refresh token 刷新，修复 Web 回调要求客户端密码却未提交的问题。secret 不回传浏览器，Public Client 仍可留空，账号范围保持个人 Microsoft 账号（`tenant=consumers`）。
 - **Token 工具指引与保存 Scope**：区分 Azure Web 与 Mobile and desktop applications 平台配置；新前端写入账号时传递授权 Scope，避免保存验证使用错误的 Scope。
 - **Token 自动导入**：授权请求补充 `openid profile email`，换取 Token 后按 Microsoft 返回的授权邮箱自动更新或创建 Outlook 账号；新旧前端移除手动账号选择和保存弹窗，显示实际导入邮箱及创建 / 更新结果。更新保留密码、分组、标签和备注；无法识别身份、账号冲突或写入失败时保留已获取的 Token，并明确提示未导入。
+- **概览账号状态分布**：账号启用状态结合最近一次 Token 刷新结果统计，已失效授权归为授权过期、其他刷新失败归为异常；从未验证的 Outlook 账号归为待验证，普通 IMAP 按启用状态统计。已停用账号单列，不再混入过期；Token 工具成功导入时记录本次验证结果，避免旧失败记录继续把新授权判为过期。
 
 ### 优化 / Improvements
 

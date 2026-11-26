@@ -3671,7 +3671,7 @@ ${details}
                         data.logs.forEach(log => {
                             const statusColor = log.status === 'success' ? '#28a745' : '#dc3545';
                             const statusText = log.status === 'success' ? '成功' : '失败';
-                            const typeText = translateAppTextLocal(log.refresh_type === 'manual' ? '手动' : '自动');
+                            const typeText = translateAppTextLocal(log.refresh_type === 'oauth_import' ? '授权导入' : (log.refresh_type === 'manual' ? '手动' : '自动'));
                             const typeColor = log.refresh_type === 'manual' ? '#007bff' : '#28a745';
                             const typeBgColor = log.refresh_type === 'manual' ? '#e7f3ff' : '#e8f5e9';
 
@@ -3728,7 +3728,7 @@ ${details}
                                     ? `<span class="badge" style="background:var(--clr-jade);color:white;">${translateAppTextLocal('成功')}</span>`
                                     : `<span class="badge" style="background:var(--clr-danger);color:white;">${translateAppTextLocal('失败')}</span>`;
                                 const typeText = translateAppTextLocal(
-                                    log.refresh_type === 'manual' ? '手动' : (log.refresh_type === 'scheduled' ? '定时' : (log.refresh_type || '-'))
+                                    log.refresh_type === 'oauth_import' ? '授权导入' : (log.refresh_type === 'manual' ? '手动' : (log.refresh_type === 'scheduled' ? '定时' : (log.refresh_type || '-')))
                                 );
                                 return `
                                     <div style="padding:0.75rem 1rem;border-bottom:1px solid var(--border-light);display:flex;align-items:center;gap:0.8rem;">

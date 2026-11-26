@@ -7,9 +7,13 @@
   - 两者闭环联动（候选 → 批量停用）
 """
 
+from contextlib import closing
 import json
+import sqlite3
+import tempfile
 import unittest
 import uuid
+from unittest.mock import patch
 
 from tests._import_app import clear_login_attempts, import_web_app_module
 
@@ -21,8 +25,44 @@ class InvalidTokenGovernanceTests(unittest.TestCase):
         cls.app = cls.module.app
 
     def setUp(self):
+        from outlook_web import config
+
+        private_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(private_dir.cleanup)
+        private_path = f"{private_dir.name}/governance.db"
+        source = self.module.create_sqlite_connection()
+        try:
+            with closing(sqlite3.connect(private_path)) as destination:
+                source.backup(destination)
+        finally:
+            source.close()
+        database_path = patch.object(config, "get_database_path", return_value=private_path)
+        database_path.start()
+        self.addCleanup(database_path.stop)
         with self.app.app_context():
             clear_login_attempts()
+
+    def test_import_only_log_sets_last_refresh_time(self):
+        client = self.app.test_client()
+        self._login(client)
+        with self.app.app_context():
+            from outlook_web.db import get_db
+
+            account_id, email = self._insert_account_direct()
+            db = get_db()
+            timestamp = db.execute(
+                "SELECT datetime(MAX(COALESCE((SELECT MAX(created_at) FROM account_refresh_logs), "
+                "datetime('now')), datetime('now')), '+1 second')"
+            ).fetchone()[0]
+            db.execute(
+                """INSERT INTO account_refresh_logs
+                   (account_id, account_email, status, refresh_type, created_at)
+                   VALUES (?, ?, 'success', 'oauth_import', ?)""",
+                (account_id, email, timestamp),
+            )
+            db.commit()
+        stats = client.get("/api/accounts/refresh-stats").get_json()["stats"]
+        self.assertEqual(stats["last_refresh_time"], timestamp)
 
     # ---------- helpers ----------
 
@@ -47,6 +87,7 @@ class InvalidTokenGovernanceTests(unittest.TestCase):
             (email, "unused", encrypt_data(f"rt_{suffix}"), "test-client-id"),
         )
         db.commit()
+        self.addCleanup(self._delete_account_fixture, cursor.lastrowid)
         return cursor.lastrowid, email
 
     def _insert_refresh_log(self, account_id, account_email, status, error_message, refresh_type="manual"):
@@ -63,6 +104,85 @@ class InvalidTokenGovernanceTests(unittest.TestCase):
             (account_id, account_email, refresh_type, status, error_message),
         )
         db.commit()
+
+    def _delete_account_fixture(self, account_id):
+        from outlook_web.db import get_db
+
+        with self.app.app_context():
+            db = get_db()
+            db.execute("DELETE FROM account_refresh_logs WHERE account_id = ?", (account_id,))
+            db.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
+            db.commit()
+
+    def test_equal_timestamp_import_recovery_updates_all_log_views(self):
+        client = self.app.test_client()
+        self._login(client)
+        baseline = client.get("/api/accounts/refresh-stats").get_json()["stats"]
+        with self.app.app_context():
+            from outlook_web.db import get_db
+
+            account_id, email = self._insert_account_direct()
+            db = get_db()
+            timestamp = db.execute("SELECT datetime('now')").fetchone()[0]
+            for status, refresh_type, error in (
+                ("failed", "manual", "invalid_grant"),
+                ("success", "oauth_import", None),
+            ):
+                db.execute(
+                    """INSERT INTO account_refresh_logs
+                       (account_id, account_email, status, refresh_type, error_message, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (account_id, email, status, refresh_type, error, timestamp),
+                )
+            db.commit()
+
+        for endpoint, key in (
+            ("refresh-logs/failed", "logs"),
+            ("invalid-token-candidates", "candidates"),
+        ):
+            rows = client.get(f"/api/accounts/{endpoint}").get_json()[key]
+            self.assertNotIn(account_id, [row["account_id"] for row in rows])
+        stats = client.get("/api/accounts/refresh-stats").get_json()["stats"]
+        self.assertEqual(stats["failed_count"], baseline["failed_count"])
+        self.assertEqual(stats["success_count"], baseline["success_count"] + 1)
+        self.assertGreaterEqual(stats["last_refresh_time"], timestamp)
+        for endpoint in ("refresh-logs", f"{account_id}/refresh-logs"):
+            rows = client.get(f"/api/accounts/{endpoint}").get_json()["logs"]
+            own = [row for row in rows if row["account_id"] == account_id]
+            self.assertEqual([row["status"] for row in own], ["success", "failed"])
+            self.assertEqual(own[0]["refresh_type"], "oauth_import")
+            self.assertGreater(own[0]["id"], own[1]["id"])
+
+    def test_equal_timestamp_failure_after_import_remains_failed(self):
+        client = self.app.test_client()
+        self._login(client)
+        baseline = client.get("/api/accounts/refresh-stats").get_json()["stats"]
+        with self.app.app_context():
+            from outlook_web.db import get_db
+
+            account_id, email = self._insert_account_direct()
+            db = get_db()
+            timestamp = db.execute("SELECT datetime('now')").fetchone()[0]
+            for status, refresh_type, error in (
+                ("success", "oauth_import", None),
+                ("failed", "manual", "invalid_grant"),
+            ):
+                db.execute(
+                    """INSERT INTO account_refresh_logs
+                       (account_id, account_email, status, refresh_type, error_message, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (account_id, email, status, refresh_type, error, timestamp),
+                )
+            db.commit()
+        for endpoint, key in (
+            ("refresh-logs/failed", "logs"),
+            ("invalid-token-candidates", "candidates"),
+        ):
+            rows = client.get(f"/api/accounts/{endpoint}").get_json()[key]
+            self.assertEqual(len([row for row in rows if row["account_id"] == account_id]), 1)
+        stats = client.get("/api/accounts/refresh-stats").get_json()["stats"]
+        self.assertEqual(stats["failed_count"], baseline["failed_count"] + 1)
+        self.assertEqual(stats["success_count"], baseline["success_count"])
 
     # ---------- _classify_refresh_failure unit tests ----------
 

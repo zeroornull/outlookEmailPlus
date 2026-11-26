@@ -1007,11 +1007,11 @@ def refresh_failed_accounts(
         SELECT DISTINCT a.id, a.email, a.client_id, a.refresh_token, a.group_id
         FROM accounts a
         INNER JOIN (
-            SELECT account_id, MAX(created_at) as last_refresh
+            SELECT account_id, MAX(id) as max_id
             FROM account_refresh_logs
             GROUP BY account_id
         ) latest ON a.id = latest.account_id
-        INNER JOIN account_refresh_logs l ON a.id = l.account_id AND l.created_at = latest.last_refresh
+        INNER JOIN account_refresh_logs l ON a.id = l.account_id AND l.id = latest.max_id
         WHERE l.status = 'failed'
           AND a.status = 'active'
           AND {build_refreshable_outlook_account_where("a.account_type", "a.provider")}

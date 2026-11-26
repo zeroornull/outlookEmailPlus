@@ -1,4 +1,7 @@
+from contextlib import closing
 import json
+import sqlite3
+import tempfile
 import unittest
 import uuid
 from unittest.mock import patch
@@ -17,6 +20,20 @@ class RefreshOutlookOnlyTests(unittest.TestCase):
         cls.graph_service = graph_service
 
     def setUp(self):
+        from outlook_web import config
+
+        private_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(private_dir.cleanup)
+        private_path = f"{private_dir.name}/refresh.db"
+        source = self.module.create_sqlite_connection()
+        try:
+            with closing(sqlite3.connect(private_path)) as destination:
+                source.backup(destination)
+        finally:
+            source.close()
+        database_path = patch.object(config, "get_database_path", return_value=private_path)
+        database_path.start()
+        self.addCleanup(database_path.stop)
         with self.app.app_context():
             clear_login_attempts()
         self._deactivate_existing_accounts()
@@ -478,6 +495,55 @@ class RefreshOutlookOnlyTests(unittest.TestCase):
 
         self.assertEqual(len(self._get_refresh_logs(account_id=outlook_id, refresh_type="retry")), 1)
         self.assertEqual(len(self._get_refresh_logs(account_id=imap_id, refresh_type="retry")), 0)
+
+    def test_retry_uses_latest_id_for_equal_timestamp_import_and_failure(self):
+        client = self.app.test_client()
+        self._login(client)
+        recovered_id = self._insert_outlook_account(
+            email_addr=f"recovered_{uuid.uuid4().hex}@outlook.com", unique="recovered"
+        )
+        failed_id = self._insert_outlook_account(
+            email_addr=f"failed_{uuid.uuid4().hex}@outlook.com", unique="failed"
+        )
+        imap_id = self._insert_imap_account(
+            email_addr=f"imap_{uuid.uuid4().hex}@example.com", unique="imap"
+        )
+        conn = self.module.create_sqlite_connection()
+        try:
+            timestamp = conn.execute("SELECT datetime('now')").fetchone()[0]
+            for account_id, states in (
+                (recovered_id, (("failed", "manual"), ("success", "oauth_import"))),
+                (failed_id, (("success", "oauth_import"), ("failed", "manual"))),
+                (imap_id, (("success", "oauth_import"), ("failed", "manual"))),
+            ):
+                email = conn.execute("SELECT email FROM accounts WHERE id = ?", (account_id,)).fetchone()[0]
+                for status, refresh_type in states:
+                    conn.execute(
+                        """INSERT INTO account_refresh_logs
+                           (account_id, account_email, status, refresh_type, error_message, created_at)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        (account_id, email, status, refresh_type,
+                         "invalid_grant" if status == "failed" else None, timestamp),
+                    )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with (
+            patch.object(self.graph_service, "test_refresh_token_with_rotation",
+                         return_value=(True, None, None)) as refresh,
+            patch("outlook_web.services.refresh.acquire_distributed_lock", return_value=(True, {})),
+            patch("outlook_web.services.refresh.release_distributed_lock"),
+        ):
+            response = client.post("/api/accounts/refresh-failed")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["total"], 1)
+        self.assertEqual(response.get_json()["success_count"], 1)
+        refresh.assert_called_once()
+        self.assertEqual(refresh.call_args.args[:2], ("client_failed", "rt_failed"))
+        self.assertEqual(len(self._get_refresh_logs(account_id=failed_id, refresh_type="retry")), 1)
+        for account_id in (recovered_id, imap_id):
+            self.assertEqual(self._get_refresh_logs(account_id=account_id, refresh_type="retry"), [])
 
     def test_manual_trigger_scheduled_refresh_conflict_returns_actionable_message(self):
         client = self.app.test_client()

@@ -2499,9 +2499,9 @@ def api_get_refresh_logs() -> Any:
         SELECT l.*, a.email as account_email
         FROM account_refresh_logs l
         LEFT JOIN accounts a ON l.account_id = a.id
-        WHERE l.refresh_type IN ('manual', 'manual_all', 'scheduled', 'retry')
+        WHERE l.refresh_type IN ('manual', 'manual_all', 'scheduled', 'retry', 'oauth_import')
         AND l.created_at >= datetime('now', '-6 months')
-        ORDER BY l.created_at DESC
+        ORDER BY l.created_at DESC, l.id DESC
         LIMIT ? OFFSET ?
     """,
         (limit, offset),
@@ -2535,7 +2535,7 @@ def api_get_account_refresh_logs(account_id: int) -> Any:
         """
         SELECT * FROM account_refresh_logs
         WHERE account_id = ?
-        ORDER BY created_at DESC
+        ORDER BY created_at DESC, id DESC
         LIMIT ? OFFSET ?
     """,
         (account_id, limit, offset),
@@ -2568,13 +2568,13 @@ def api_get_failed_refresh_logs() -> Any:
         SELECT l.*, a.email as account_email, a.status as account_status
         FROM account_refresh_logs l
         INNER JOIN (
-            SELECT account_id, MAX(created_at) as last_refresh
+            SELECT account_id, MAX(id) as max_id
             FROM account_refresh_logs
             GROUP BY account_id
-        ) latest ON l.account_id = latest.account_id AND l.created_at = latest.last_refresh
+        ) latest ON l.account_id = latest.account_id AND l.id = latest.max_id
         LEFT JOIN accounts a ON l.account_id = a.id
         WHERE l.status = 'failed'
-        ORDER BY l.created_at DESC
+        ORDER BY l.created_at DESC, l.id DESC
     """)
 
     logs = []
@@ -2680,7 +2680,7 @@ def api_get_refresh_stats() -> Any:
     cursor = db.execute("""
         SELECT MAX(created_at) as last_refresh_time
         FROM account_refresh_logs
-        WHERE refresh_type IN ('manual', 'manual_all', 'scheduled', 'retry')
+        WHERE refresh_type IN ('manual', 'manual_all', 'scheduled', 'retry', 'oauth_import')
     """)
     row = cursor.fetchone()
     last_refresh_time = row["last_refresh_time"] if row else None
@@ -2696,10 +2696,10 @@ def api_get_refresh_stats() -> Any:
         SELECT COUNT(DISTINCT l.account_id) as failed_count
         FROM account_refresh_logs l
         INNER JOIN (
-            SELECT account_id, MAX(created_at) as last_refresh
+            SELECT account_id, MAX(id) as max_id
             FROM account_refresh_logs
             GROUP BY account_id
-        ) latest ON l.account_id = latest.account_id AND l.created_at = latest.last_refresh
+        ) latest ON l.account_id = latest.account_id AND l.id = latest.max_id
         INNER JOIN accounts a ON l.account_id = a.id
         WHERE l.status = 'failed' AND a.status = 'active'
     """)

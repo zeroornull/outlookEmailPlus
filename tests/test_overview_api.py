@@ -82,6 +82,8 @@ class OverviewSummaryApiTests(OverviewApiBaseTests):
         """A-01 数据类型: account_status 各值为整数"""
         resp = self._get(self._URL)
         data = self._assert_json(resp)
+        self.assertEqual(set(data["account_status"]), {"total", "active", "expired", "pending_refresh", "error", "disabled"})
+        self.assertEqual(data["account_status"]["total"], sum(v for k, v in data["account_status"].items() if k != "total"))
         for k, v in data.get("account_status", {}).items():
             self.assertIsInstance(v, (int, float), f"account_status.{k} 应为数值, 实际: {type(v)}")
 

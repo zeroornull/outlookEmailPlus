@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import sqlite3
 import threading
 import unittest
 import uuid
@@ -109,6 +110,79 @@ class OAuthToolTestBase(unittest.TestCase):
         header = base64.urlsafe_b64encode(json.dumps({"alg": "RS256"}).encode()).rstrip(b"=").decode()
         payload = base64.urlsafe_b64encode(json.dumps(payload_data).encode()).rstrip(b"=").decode()
         return f"{header}.{payload}.fake-signature"
+
+
+class OAuthImportHealthTests(unittest.TestCase):
+    """Use a private connection so rollback assertions never affect another module."""
+
+    def setUp(self):
+        module = import_web_app_module()
+        self.context = module.app.app_context()
+        self.context.push()
+        self.addCleanup(self.context.pop)
+        from outlook_web.db import get_db
+
+        self.db = sqlite3.connect(":memory:")
+        self.db.row_factory = sqlite3.Row
+        self.addCleanup(self.db.close)
+        get_db().backup(self.db)
+        self.db.execute("DELETE FROM account_refresh_logs")
+        self.db.execute("DELETE FROM accounts")
+        self.account_id = self.db.execute(
+            "INSERT INTO accounts (email, client_id, refresh_token, status) "
+            "VALUES ('health@oauth.test', 'old-client', 'old-token', 'active')"
+        ).lastrowid
+        self.db.execute(
+            "INSERT INTO account_refresh_logs (account_id, account_email, status, error_message) "
+            "VALUES (?, 'health@oauth.test', 'failed', 'invalid_grant')", (self.account_id,)
+        )
+        self.db.commit()
+        for target, value in (("get_db", self.db), ("encrypt_data", "encrypted-new-token"), ("log_audit", None)):
+            patcher = patch(f"outlook_web.controllers.token_tool.{target}", return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_validated_import_replaces_stale_failure(self):
+        from outlook_web.controllers.token_tool import _upsert_token_account
+        from outlook_web.repositories.overview import get_overview_summary
+
+        self.assertEqual(get_overview_summary(self.db)["account_status"]["expired"], 1)
+        account, error = _upsert_token_account("health@oauth.test", "new-client", "new-token")
+        self.assertIsNone(error)
+        self.assertEqual(account["account_id"], self.account_id)
+        row = self.db.execute("SELECT * FROM account_refresh_logs ORDER BY id DESC LIMIT 1").fetchone()
+        self.assertEqual((row["refresh_type"], row["status"], row["account_email"]),
+                         ("oauth_import", "success", "health@oauth.test"))
+        self.assertIsNotNone(self.db.execute("SELECT last_refresh_at FROM accounts").fetchone()[0])
+        self.assertEqual(get_overview_summary(self.db)["account_status"]["active"], 1)
+
+    def test_success_log_storage_failure_rolls_back_credentials_and_timestamp(self):
+        from outlook_web.controllers.token_tool import _upsert_token_account
+
+        before = dict(self.db.execute("SELECT * FROM accounts").fetchone())
+        self.db.execute("CREATE TRIGGER reject_import BEFORE INSERT ON account_refresh_logs "
+                        "BEGIN SELECT RAISE(ABORT, 'test storage failure'); END")
+        self.db.commit()
+        account, error = _upsert_token_account("health@oauth.test", "new-client", "new-token")
+        self.assertIsNone(account)
+        self.assertEqual(error[0], "INTERNAL_ERROR")
+        self.assertEqual(dict(self.db.execute("SELECT * FROM accounts").fetchone()), before)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM account_refresh_logs").fetchone()[0], 1)
+        account, error = _upsert_token_account("new@oauth.test", "new-client", "new-token")
+        self.assertIsNone(account)
+        self.assertEqual(error[0], "INTERNAL_ERROR")
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM accounts").fetchone()[0], 1)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM account_refresh_logs").fetchone()[0], 1)
+
+    def test_conflicting_import_writes_no_success_evidence(self):
+        from outlook_web.controllers.token_tool import _upsert_token_account
+
+        self.db.execute("UPDATE accounts SET account_type = 'imap'")
+        self.db.commit()
+        account, error = _upsert_token_account("health@oauth.test", "new-client", "new-token")
+        self.assertIsNone(account)
+        self.assertEqual(error[0], "OAUTH_ACCOUNT_CONFLICT")
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM account_refresh_logs").fetchone()[0], 1)
 
 
 class OAuthToolPkceTests(OAuthToolTestBase):
@@ -748,7 +822,8 @@ class OAuthToolApiExchangeTests(OAuthToolTestBase):
             self.assertEqual(after["client_id"], "cid")
             self.assertEqual(after["refresh_token"], "mock-new-rt")
             self.assertEqual(after["status"], "active")
-            for key in before.keys() - {"client_id", "refresh_token", "status", "updated_at"}:
+            self.assertIsNotNone(after["last_refresh_at"])
+            for key in before.keys() - {"client_id", "refresh_token", "status", "updated_at", "last_refresh_at"}:
                 self.assertEqual(after[key], before[key], key)
             self.assertEqual(tags_repo.get_account_tags(account_id), before_tags)
             self.assertEqual(accounts_repo.get_account_by_id(other_id), other_before)
@@ -1152,7 +1227,8 @@ class OAuthToolApiSaveTests(OAuthToolTestBase):
             self.assertEqual(after["client_id"], "replacement-cid")
             self.assertEqual(after["refresh_token"], "rotated-rt")
             self.assertEqual(after["status"], "active")
-            for key in before.keys() - {"client_id", "refresh_token", "status", "updated_at"}:
+            self.assertIsNotNone(after["last_refresh_at"])
+            for key in before.keys() - {"client_id", "refresh_token", "status", "updated_at", "last_refresh_at"}:
                 self.assertEqual(after[key], before[key], key)
             self.assertEqual(tags_repo.get_account_tags(account_id), before_tags)
             self.assertEqual(get_db().execute("SELECT COUNT(*) FROM accounts").fetchone()[0], 1)
@@ -1174,6 +1250,9 @@ class OAuthToolApiSaveTests(OAuthToolTestBase):
             self.assertEqual(response.status_code, 400)
         with self.app.app_context():
             self.assertEqual(accounts_repo.get_account_by_id(account_id), before)
+            from outlook_web.db import get_db
+
+            self.assertEqual(get_db().execute("SELECT COUNT(*) FROM account_refresh_logs").fetchone()[0], 0)
 
     @patch("outlook_web.services.graph.test_refresh_token_with_rotation")
     def test_save_rejects_other_account_types_and_providers(self, mock_test_rt):

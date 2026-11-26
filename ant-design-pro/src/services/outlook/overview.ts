@@ -10,6 +10,7 @@ export type OverviewSummary = {
     expired?: number;
     pending_refresh?: number;
     error?: number;
+    disabled?: number;
   };
   pool_snapshot?: {
     available?: number;

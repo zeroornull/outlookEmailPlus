@@ -181,24 +181,32 @@ const SummaryPane: React.FC<{ data?: OverviewSummary; loading: boolean }> = ({
                   status: 'success',
                 },
                 {
-                  label: '过期',
+                  label: '授权过期 / 需重新授权',
                   value: account.expired || 0,
                   total: account.total || 0,
                   status: 'exception',
                 },
                 {
-                  label: '待刷新',
+                  label: '待验证',
                   value: account.pending_refresh || 0,
                   total: account.total || 0,
                 },
                 {
-                  label: '异常',
+                  label: '刷新异常',
                   value: account.error || 0,
                   total: account.total || 0,
                   status: 'exception',
                 },
+                {
+                  label: '已停用',
+                  value: account.disabled || 0,
+                  total: account.total || 0,
+                },
               ]}
             />
+            <Typography.Text type="secondary">
+              Outlook 按最新令牌刷新结果判断；普通 IMAP 按启用状态统计，未验证连接。
+            </Typography.Text>
           </ProCard>
         </Col>
         <Col xs={24} md={12}>
