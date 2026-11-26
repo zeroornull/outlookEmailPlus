@@ -22,10 +22,12 @@ from flask import abort, jsonify, render_template, request, session
 
 from outlook_web import config as app_config
 from outlook_web.audit import log_audit
+from outlook_web.db import get_db
 from outlook_web.errors import build_error_response
 from outlook_web.repositories import accounts as accounts_repo
 from outlook_web.repositories import settings as settings_repo
 from outlook_web.security.auth import login_required
+from outlook_web.security.crypto import encrypt_data
 from outlook_web.services import graph as graph_service
 from outlook_web.services import oauth_tool as oauth_tool_service
 
@@ -238,8 +240,23 @@ def save_to_account() -> Any:
     if new_rt:
         refresh_token = new_rt
 
-    if mode == "update":
-        account_id = data.get("account_id")
+    existing = None
+    if mode == "create":
+        email = (data.get("email") or "").strip()
+        if not email or "@" not in email:
+            return build_error_response("OAUTH_CONFIG_INVALID", "邮箱格式无效", status=400)
+        # 与账号仓库及 email UNIQUE 约束一致：去除首尾空白，区分大小写。
+        existing = accounts_repo.get_account_by_email(email)
+        if existing and (
+            (existing.get("account_type") or "outlook").strip().lower() != "outlook"
+            or (existing.get("provider") or "outlook").strip().lower() != "outlook"
+        ):
+            return build_error_response(
+                "OAUTH_ACCOUNT_CONFLICT", "该邮箱已属于其他类型或服务商的账号，无法覆盖凭据", status=409
+            )
+
+    if mode == "update" or (mode == "create" and existing):
+        account_id = existing["id"] if existing else data.get("account_id")
         if not account_id:
             return build_error_response("OAUTH_CONFIG_INVALID", "account_id 不能为空", status=400)
         try:
@@ -251,25 +268,17 @@ def save_to_account() -> Any:
         if not existing:
             return build_error_response("ACCOUNT_NOT_FOUND", "账号不存在", status=404)
 
-        success = accounts_repo.update_account_credentials(
-            account_id_int,
-            client_id=client_id,
-            refresh_token=refresh_token,
-        )
-        if not success:
-            return build_error_response("INTERNAL_ERROR", "更新账号失败", status=500)
-
-        success = accounts_repo.update_account(
-            account_id=account_id_int,
-            email_addr=existing["email"],
-            password=None,
-            client_id=client_id,
-            refresh_token=refresh_token,
-            group_id=existing.get("group_id") or 1,
-            remark=existing.get("remark") or "",
-            status="active",
-        )
-        if not success:
+        # 单次写入仅替换凭据及状态，保留密码、分组、标签和所有其他元数据。
+        db = get_db()
+        try:
+            db.execute(
+                "UPDATE accounts SET client_id = ?, refresh_token = ?, status = 'active', "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (client_id, encrypt_data(refresh_token), account_id_int),
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
             return build_error_response("INTERNAL_ERROR", "更新账号失败", status=500)
 
         log_audit(
@@ -286,14 +295,12 @@ def save_to_account() -> Any:
                     "email": existing["email"],
                     "status": "active",
                     "token_valid": True,
+                    "action": "updated",
                 },
             }
         )
 
     if mode == "create":
-        email = (data.get("email") or "").strip()
-        if not email or "@" not in email:
-            return build_error_response("OAUTH_CONFIG_INVALID", "邮箱格式无效", status=400)
 
         success = accounts_repo.add_account(
             email_addr=email,
@@ -316,6 +323,7 @@ def save_to_account() -> Any:
                     "email": email,
                     "status": "active",
                     "token_valid": True,
+                    "action": "created",
                 },
             }
         )

@@ -44,7 +44,7 @@ const TokenToolPage: React.FC = () => {
   const [callbackUrl, setCallbackUrl] = useState('');
   const [tokenResult, setTokenResult] = useState<TokenResult | null>(null);
   const [saveOpen, setSaveOpen] = useState(false);
-  const [saveMode, setSaveMode] = useState<'update' | 'create'>('update');
+  const [saveMode, setSaveMode] = useState<'update' | 'create'>('create');
   const [accounts, setAccounts] = useState<
     Array<{ id: number; email: string; status?: string }>
   >([]);
@@ -192,7 +192,7 @@ const TokenToolPage: React.FC = () => {
         body.account_id = accountId;
       } else {
         if (!newEmail.trim()) {
-          message.error('请输入新账号邮箱');
+          message.error('请输入邮箱地址');
           return;
         }
         body.email = newEmail.trim();
@@ -202,7 +202,13 @@ const TokenToolPage: React.FC = () => {
         message.error(pickTokenToolError(res, '写入失败'));
         return;
       }
-      message.success(res.message || 'Token 已写入账号');
+      message.success(
+        res.data?.action === 'created'
+          ? '账号已创建，Token 已写入'
+          : res.data?.action === 'updated'
+            ? '账号 Token 已更新'
+            : 'Token 已写入账号',
+      );
       setSaveOpen(false);
     } catch (error: any) {
       message.error(
@@ -378,8 +384,8 @@ const TokenToolPage: React.FC = () => {
           onChange={(e) => setSaveMode(e.target.value)}
           style={{ marginBottom: 16 }}
         >
-          <Radio.Button value="update">更新已有账号</Radio.Button>
-          <Radio.Button value="create">创建新账号</Radio.Button>
+          <Radio.Button value="update">选择账号更新</Radio.Button>
+          <Radio.Button value="create">按邮箱保存</Radio.Button>
         </Radio.Group>
         {saveMode === 'update' ? (
           <Select
@@ -393,11 +399,14 @@ const TokenToolPage: React.FC = () => {
             }))}
           />
         ) : (
-          <Input
-            placeholder="新账号邮箱"
-            value={newEmail}
-            onChange={(e) => setNewEmail(e.target.value)}
-          />
+          <>
+            <Input
+              placeholder="邮箱地址"
+              value={newEmail}
+              onChange={(e) => setNewEmail(e.target.value)}
+            />
+            <p>邮箱已存在时更新 Token，不存在时创建账号；保留已有账号的其他信息。</p>
+          </>
         )}
       </Modal>
     </PageContainer>

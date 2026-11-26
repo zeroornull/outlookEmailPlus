@@ -223,10 +223,10 @@
         <div class="token-dialog-body">
             <div id="saveDialogStatus" class="token-status token-dialog-status hidden"></div>
             <label class="dialog-mode">
-                <input type="radio" name="saveMode" value="update" checked onchange="toggleSaveMode()">
-                <span>更新已有账号</span>
+                <input type="radio" name="saveMode" value="update" onchange="toggleSaveMode()">
+                <span>选择账号更新</span>
             </label>
-            <div id="updateModeSection" class="dialog-section">
+            <div id="updateModeSection" class="dialog-section hidden">
                 <label class="token-field token-field-full">
                     <span>选择账号</span>
                     <select id="accountSelect" class="form-input"></select>
@@ -234,14 +234,15 @@
             </div>
 
             <label class="dialog-mode">
-                <input type="radio" name="saveMode" value="create" onchange="toggleSaveMode()">
-                <span>创建新账号</span>
+                <input type="radio" name="saveMode" value="create" checked onchange="toggleSaveMode()">
+                <span>按邮箱保存</span>
             </label>
-            <div id="createModeSection" class="dialog-section hidden">
+            <div id="createModeSection" class="dialog-section">
                 <label class="token-field token-field-full">
                     <span>邮箱地址</span>
                     <input id="newAccountEmail" type="email" class="form-input" placeholder="user@outlook.com">
                 </label>
+                <p>邮箱已存在时更新 Token，不存在时创建账号；保留已有账号的其他信息。</p>
             </div>
         </div>
         <div class="token-dialog-footer">

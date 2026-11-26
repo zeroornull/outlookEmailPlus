@@ -81,7 +81,12 @@ export async function saveTokenToAccount(body: {
   account_id?: number | string;
   email?: string;
 }) {
-  return outlookRequest<{ success: boolean; message?: string; error?: any }>(
+  return outlookRequest<{
+    success: boolean;
+    data?: { action: 'created' | 'updated' };
+    message?: string;
+    error?: unknown;
+  }>(
     '/api/token-tool/save',
     { method: 'POST', data: body, skipErrorHandler: true },
   );

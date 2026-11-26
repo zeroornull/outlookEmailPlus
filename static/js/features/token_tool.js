@@ -377,7 +377,7 @@ function copyText(text) {
 }
 
 function toggleSaveMode() {
-    const selected = document.querySelector('input[name="saveMode"]:checked')?.value || 'update';
+    const selected = document.querySelector('input[name="saveMode"]:checked')?.value || 'create';
     document.getElementById('updateModeSection')?.classList.toggle('hidden', selected !== 'update');
     document.getElementById('createModeSection')?.classList.toggle('hidden', selected !== 'create');
     clearSaveDialogStatus();
@@ -398,7 +398,9 @@ async function loadAccountOptions() {
     const accounts = data.data || [];
     if (!accounts.length) {
         select.innerHTML = `<option value="">${t('暂无可更新账号')}</option>`;
-        showSaveDialogStatus(t('当前没有可更新账号，可切换到“创建新账号”模式'), 'info');
+        if (document.querySelector('input[name="saveMode"]:checked')?.value === 'update') {
+            showSaveDialogStatus(t('当前没有可更新账号，可切换到“按邮箱保存”模式'), 'info');
+        }
         return;
     }
     clearSaveDialogStatus();
@@ -428,7 +430,7 @@ function closeSaveDialog() {
 async function confirmSaveToAccount() {
     clearStatus();
     clearSaveDialogStatus();
-    const mode = document.querySelector('input[name="saveMode"]:checked')?.value || 'update';
+    const mode = document.querySelector('input[name="saveMode"]:checked')?.value || 'create';
     const resultData = getCurrentTokenResult();
     const payload = {
         mode,
@@ -446,7 +448,7 @@ async function confirmSaveToAccount() {
     } else {
         payload.email = document.getElementById('newAccountEmail')?.value.trim() || '';
         if (!payload.email) {
-            showSaveDialogStatus(t('请输入新账号邮箱地址'), 'error');
+            showSaveDialogStatus(t('请输入邮箱地址'), 'error');
             return;
         }
     }
@@ -461,7 +463,12 @@ async function confirmSaveToAccount() {
     }
 
     closeSaveDialog();
-    showStatus(t('Token 已写入账号'), 'success');
+    const action = data.data?.action;
+    showStatus(action === 'created'
+        ? t('账号已创建，Token 已写入')
+        : action === 'updated'
+            ? t('账号 Token 已更新')
+            : t('Token 已写入账号'), 'success');
 }
 
 document.addEventListener('DOMContentLoaded', () => {

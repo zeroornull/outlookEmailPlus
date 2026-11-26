@@ -904,6 +904,7 @@ class OAuthToolApiSaveTests(OAuthToolTestBase):
             )
             self.assertEqual(resp.status_code, 200)
             self.assertTrue(resp.get_json().get("success"))
+            self.assertEqual(resp.get_json()["data"]["action"], "updated")
 
         with self.app.app_context():
             from outlook_web.repositories import accounts as accounts_repo
@@ -929,6 +930,7 @@ class OAuthToolApiSaveTests(OAuthToolTestBase):
             )
             self.assertEqual(resp.status_code, 200)
             self.assertTrue(resp.get_json().get("success"))
+            self.assertEqual(resp.get_json()["data"]["action"], "created")
 
         with self.app.app_context():
             from outlook_web.repositories import accounts as accounts_repo
@@ -937,6 +939,102 @@ class OAuthToolApiSaveTests(OAuthToolTestBase):
             self.assertIsNotNone(acc)
             self.assertEqual(acc["client_id"], "new-cid")
             self.assertEqual(acc["refresh_token"], "new-rt")
+
+    @patch("outlook_web.services.graph.test_refresh_token_with_rotation")
+    def test_save_create_updates_email_preserving_metadata(self, mock_test_rt):
+        mock_test_rt.return_value = (True, None, "rotated-rt")
+        account_id = self._insert_test_account(email="KeepCase@oauth-test.com")
+        with self.app.app_context():
+            from outlook_web.db import get_db
+            from outlook_web.repositories import accounts as accounts_repo, tags as tags_repo
+
+            accounts_repo.update_account_credentials(account_id, password="keep-password")
+            db = get_db()
+            db.execute("UPDATE accounts SET status = 'inactive', remark = 'keep remark' WHERE id = ?", (account_id,))
+            db.commit()
+            tag_id = tags_repo.add_tag("keep-" + uuid.uuid4().hex, "#123456")
+            tags_repo.add_account_tag(account_id, tag_id)
+            before = accounts_repo.get_account_by_id(account_id)
+            before_tags = tags_repo.get_account_tags(account_id)
+
+        with self.app.test_client() as client:
+            self._login(client)
+            response = client.post("/api/token-tool/save", json={
+                "mode": "create", "email": "  KeepCase@oauth-test.com  ",
+                "client_id": "replacement-cid", "refresh_token": "replacement-rt",
+            })
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json()["data"]["action"], "updated")
+            self.assertEqual(response.get_json()["data"]["account_id"], account_id)
+
+        with self.app.app_context():
+            after = accounts_repo.get_account_by_id(account_id)
+            self.assertEqual(after["client_id"], "replacement-cid")
+            self.assertEqual(after["refresh_token"], "rotated-rt")
+            self.assertEqual(after["status"], "active")
+            for key in before.keys() - {"client_id", "refresh_token", "status", "updated_at"}:
+                self.assertEqual(after[key], before[key], key)
+            self.assertEqual(tags_repo.get_account_tags(account_id), before_tags)
+            self.assertEqual(get_db().execute("SELECT COUNT(*) FROM accounts").fetchone()[0], 1)
+
+    @patch("outlook_web.services.graph.test_refresh_token_with_rotation")
+    def test_save_create_invalid_token_keeps_existing_account(self, mock_test_rt):
+        mock_test_rt.return_value = (False, "invalid token", None)
+        account_id = self._insert_test_account()
+        with self.app.app_context():
+            from outlook_web.repositories import accounts as accounts_repo
+
+            before = accounts_repo.get_account_by_id(account_id)
+        with self.app.test_client() as client:
+            self._login(client)
+            response = client.post("/api/token-tool/save", json={
+                "mode": "create", "email": before["email"],
+                "client_id": "replacement-cid", "refresh_token": "invalid-rt",
+            })
+            self.assertEqual(response.status_code, 400)
+        with self.app.app_context():
+            self.assertEqual(accounts_repo.get_account_by_id(account_id), before)
+
+    @patch("outlook_web.services.graph.test_refresh_token_with_rotation")
+    def test_save_create_rejects_other_account_types_and_providers(self, mock_test_rt):
+        mock_test_rt.return_value = (True, None, "rotated-rt")
+        for account_type, provider in (("imap", "outlook"), ("outlook", "custom")):
+            with self.subTest(account_type=account_type, provider=provider):
+                email = f"{account_type}-{provider}@oauth-test.com"
+                account_id = self._insert_test_account(email=email)
+                with self.app.app_context():
+                    from outlook_web.repositories import accounts as accounts_repo
+
+                    accounts_repo.update_account_credentials(account_id, account_type=account_type, provider=provider)
+                    before = accounts_repo.get_account_by_id(account_id)
+                with self.app.test_client() as client:
+                    self._login(client)
+                    response = client.post("/api/token-tool/save", json={
+                        "mode": "create", "email": email,
+                        "client_id": "replacement-cid", "refresh_token": "replacement-rt",
+                    })
+                    self.assertEqual(response.status_code, 409)
+                    self.assertEqual(response.get_json()["code"], "OAUTH_ACCOUNT_CONFLICT")
+                with self.app.app_context():
+                    self.assertEqual(accounts_repo.get_account_by_id(account_id), before)
+
+    @patch("outlook_web.services.graph.test_refresh_token_with_rotation")
+    def test_save_create_email_matching_remains_case_sensitive(self, mock_test_rt):
+        mock_test_rt.return_value = (True, None, None)
+        account_id = self._insert_test_account(email="Upper@oauth-test.com")
+        with self.app.test_client() as client:
+            self._login(client)
+            response = client.post("/api/token-tool/save", json={
+                "mode": "create", "email": "upper@oauth-test.com",
+                "client_id": "new-cid", "refresh_token": "new-rt",
+            })
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json()["data"]["action"], "created")
+            self.assertNotEqual(response.get_json()["data"]["account_id"], account_id)
+        with self.app.app_context():
+            from outlook_web.repositories import accounts as accounts_repo
+
+            self.assertEqual(accounts_repo.get_account_by_id(account_id)["refresh_token"], "old-rt")
 
     @patch.dict("os.environ", {"OAUTH_CLIENT_ID": "server-cid", "OAUTH_CLIENT_SECRET": "server-secret"})
     @patch("outlook_web.services.graph.requests.post")
