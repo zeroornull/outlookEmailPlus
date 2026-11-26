@@ -107,6 +107,18 @@ kubectl --context default -n dev get deployment outlook-email-plus -o jsonpath="
 | 部署结果 | server dry-run、rollout、镜像 digest 核对通过；公网健康检查 HTTP 200、`status=ok` |
 | 验证 | 概览修复、覆盖导入待验证状态与账号健康状态合并发布；76 项后端定向测试、SPA TypeScript、13 项状态标签测试与旧前端语法检查通过；线上 `/api/accounts` 返回 `health_status`，账号管理页把最近刷新失败的账号显示为“授权过期”，不再显示“正常”，概览统计为 62 个授权过期 / 64 个活跃 |
 
+## 2026-11-26 重复导入确认与邮箱回跳修复
+
+| 项目 | 记录 |
+| --- | --- |
+| Git commit | `d4412da0d4b540062f3bab1da0e888e39391ac64` |
+| Actions | [45859238715](https://github.com/zeroornull/outlookEmailPlus/actions/runs/45859238715)，多架构合并成功 |
+| 镜像 | `ghcr.io/zeroornull/outlook-email-plus@sha256:f93024f735f1d3d6aa0382fb95cfd786530e9d71b9e1f1b9c48640dcf0920b37` |
+| 上一镜像 | `ghcr.io/zeroornull/outlook-email-plus@sha256:06f05bca552258c50af8ae7a396caa5d4d348c32084f48c18818384cd5b68076` |
+| 部署前备份 | `/app/data/outlook_accounts.db.20261126T163212675528Z-36607184294247e5b2464e9cc053ec89.bak`，3080192 字节 |
+| 部署结果 | server dry-run、rollout、镜像 digest 核对通过；公网健康检查 HTTP 200、`status=ok` |
+| 验证 | 47 项导入测试、TypeScript 与 20 项前端测试通过；容器内邮箱页脚本包含离开 `/mailbox` 后不再 `history.replace` 的判断 |
+
 ## 每日 Token 刷新
 
 线上已设置 `enable_scheduled_refresh=true`、`use_cron_schedule=false`、`refresh_interval_days=1`。现有任务每天北京时间 02:00 检查刷新，执行时读取数据库中的周期，无需为这项配置重启服务。
