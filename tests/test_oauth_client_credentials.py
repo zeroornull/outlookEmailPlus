@@ -195,5 +195,96 @@ class OAuthClientCredentialTests(unittest.TestCase):
         self._assert_refresh_payloads("public-client", "")
 
 
+class OAuthRefreshGrantTests(unittest.TestCase):
+    def setUp(self):
+        imap.clear_imap_token_cache()
+        self.addCleanup(imap.clear_imap_token_cache)
+        secret = patch.object(settings_repo, "get_oauth_client_secret_for_client", return_value="server-secret")
+        secret.start()
+        self.addCleanup(secret.stop)
+
+    def test_all_refresh_entries_recover_public_grants_without_changing_resource_scope(self):
+        rejected = MagicMock(status_code=400)
+        rejected.json.return_value = {
+            "error": "invalid_request",
+            "error_codes": [90023],
+            "error_description": "AADSTS90023: Public clients can't send a client secret.",
+        }
+        entries = (
+            (lambda: graph.get_access_token_graph_result("same-client", "public-grant", "http://proxy"),
+             graph.TOKEN_URL_GRAPH, graph.DEFAULT_GRAPH_SCOPE, 30, {"http": "http://proxy", "https": "http://proxy"}),
+            (lambda: graph.test_refresh_token_with_rotation("same-client", "public-grant", "http://proxy", tenant="consumers"),
+             graph.build_token_url("consumers"), None, 15, {"http": "http://proxy", "https": "http://proxy"}),
+            (lambda: imap.get_access_token_imap_result("same-client", "public-grant"),
+             imap.TOKEN_URL_IMAP, "https://outlook.office.com/IMAP.AccessAsUser.All offline_access", 30, None),
+        )
+        for refresh, url, scope, timeout, proxies in entries:
+            with self.subTest(url=url, scope=scope):
+                with patch("outlook_web.services.oauth_refresh.requests.post",
+                           side_effect=[rejected, OAuthClientCredentialTests._response()]) as post:
+                    result = refresh()
+                self.assertEqual(post.call_count, 2)
+                first, second = post.call_args_list
+                self.assertEqual(first.args, (url,))
+                self.assertEqual(second.args, (url,))
+                self.assertEqual(first.kwargs["data"]["client_secret"], "server-secret")
+                self.assertNotIn("client_secret", second.kwargs["data"])
+                self.assertEqual(second.kwargs["data"], {
+                    key: value for key, value in first.kwargs["data"].items() if key != "client_secret"
+                })
+                if scope is None:
+                    self.assertNotIn("scope", second.kwargs["data"])
+                    self.assertEqual(result, (True, None, "rotated-refresh-token"))
+                else:
+                    self.assertEqual(second.kwargs["data"]["scope"], scope)
+                    self.assertTrue(result["success"])
+                self.assertEqual(second.kwargs["timeout"], timeout)
+                self.assertEqual(second.kwargs.get("proxies"), proxies)
+
+    def test_validation_omits_unspecified_scope_and_preserves_explicit_scope(self):
+        for scope in (None, "", "  ", "  offline_access https://outlook.office.com/IMAP.AccessAsUser.All  "):
+            with self.subTest(scope=scope):
+                with patch("outlook_web.services.oauth_refresh.requests.post",
+                           return_value=OAuthClientCredentialTests._response()) as post:
+                    result = graph.test_refresh_token_with_rotation("client", "grant", scope=scope)
+                payload = post.call_args.kwargs["data"]
+                if scope and scope.strip():
+                    self.assertEqual(payload["scope"], scope.strip())
+                else:
+                    self.assertNotIn("scope", payload)
+                self.assertEqual(result, (True, None, "rotated-refresh-token"))
+
+    def test_validation_requires_access_token_before_accepting_rotation(self):
+        for payload in ({}, {"refresh_token": "unproven-rotation"}, {"access_token": ""}, {"access_token": "  "}, None, []):
+            with self.subTest(payload=payload):
+                response = MagicMock(status_code=200)
+                response.json.return_value = payload
+                with patch("outlook_web.services.oauth_refresh.requests.post", return_value=response) as post:
+                    ok, error, rotated = graph.test_refresh_token_with_rotation("client", "grant")
+                self.assertFalse(ok)
+                self.assertIn("access_token", error)
+                self.assertIsNone(rotated)
+                post.assert_called_once()
+
+    def test_validation_rejects_non_json_success_without_retry(self):
+        response = MagicMock(status_code=200)
+        response.json.side_effect = ValueError("not JSON")
+        with patch("outlook_web.services.oauth_refresh.requests.post", return_value=response) as post:
+            ok, error, rotated = graph.test_refresh_token_with_rotation("client", "grant")
+        self.assertFalse(ok)
+        self.assertIn("access_token", error)
+        self.assertIsNone(rotated)
+        post.assert_called_once()
+
+    def test_validation_keeps_retry_after_backoff_and_rotated_token(self):
+        limited = MagicMock(status_code=429, headers={"Retry-After": "7"})
+        with patch("outlook_web.services.oauth_refresh.requests.post",
+                   side_effect=[limited, OAuthClientCredentialTests._response()]) as post, patch("time.sleep") as sleep:
+            result = graph.test_refresh_token_with_rotation("client", "grant", max_retries=1)
+        self.assertEqual(result, (True, None, "rotated-refresh-token"))
+        self.assertEqual(post.call_count, 2)
+        sleep.assert_called_once_with(7)
+
+
 if __name__ == "__main__":
     unittest.main()

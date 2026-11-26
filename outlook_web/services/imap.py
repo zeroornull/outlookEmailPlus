@@ -10,12 +10,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.header import decode_header
 from typing import Any, Dict, List, Optional
 
-import requests
-
 from outlook_web.errors import build_error_payload
 from outlook_web.repositories import settings as settings_repo
 from outlook_web.services.graph import get_access_token_graph
 from outlook_web.services.http import get_response_details
+from outlook_web.services.oauth_refresh import post_refresh_token
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -255,7 +254,7 @@ def get_access_token_imap_result(client_id: str, refresh_token: str) -> Dict[str
         client_secret = settings_repo.get_oauth_client_secret_for_client(client_id)
         if client_secret:
             data["client_secret"] = client_secret
-        res = requests.post(TOKEN_URL_IMAP, data=data, timeout=30)
+        res = post_refresh_token(TOKEN_URL_IMAP, data=data, timeout=30)
 
         if res.status_code != 200:
             details = get_response_details(res)
@@ -272,7 +271,7 @@ def get_access_token_imap_result(client_id: str, refresh_token: str) -> Dict[str
 
         payload = res.json()
         access_token = payload.get("access_token")
-        if not access_token:
+        if not isinstance(access_token, str) or not access_token.strip():
             return {
                 "success": False,
                 "error": build_error_payload(

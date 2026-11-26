@@ -1037,7 +1037,7 @@ class OAuthToolApiSaveTests(OAuthToolTestBase):
             self.assertEqual(accounts_repo.get_account_by_id(account_id)["refresh_token"], "old-rt")
 
     @patch.dict("os.environ", {"OAUTH_CLIENT_ID": "server-cid", "OAUTH_CLIENT_SECRET": "server-secret"})
-    @patch("outlook_web.services.graph.requests.post")
+    @patch("outlook_web.services.oauth_refresh.requests.post")
     def test_save_validation_sends_server_secret_and_preserves_scope(self, mock_post):
         mock_post.return_value.status_code = 200
         mock_post.return_value.json.return_value = {"access_token": "at", "refresh_token": "rotated-rt"}

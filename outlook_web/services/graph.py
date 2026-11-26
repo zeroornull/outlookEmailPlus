@@ -7,6 +7,7 @@ import requests
 from outlook_web.errors import build_error_payload
 from outlook_web.repositories import settings as settings_repo
 from outlook_web.services.http import get_response_details
+from outlook_web.services.oauth_refresh import post_refresh_token
 
 # Token 端点
 TOKEN_URL_TEMPLATE = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
@@ -44,7 +45,7 @@ def get_access_token_graph_result(client_id: str, refresh_token: str, proxy_url:
         client_secret = settings_repo.get_oauth_client_secret_for_client(client_id)
         if client_secret:
             data["client_secret"] = client_secret
-        res = requests.post(TOKEN_URL_GRAPH, data=data, timeout=30, proxies=proxies)
+        res = post_refresh_token(TOKEN_URL_GRAPH, data=data, timeout=30, proxies=proxies)
 
         if res.status_code != 200:
             details = get_response_details(res)
@@ -61,7 +62,7 @@ def get_access_token_graph_result(client_id: str, refresh_token: str, proxy_url:
 
         payload = res.json()
         access_token = payload.get("access_token")
-        if not access_token:
+        if not isinstance(access_token, str) or not access_token.strip():
             return {
                 "success": False,
                 "error": build_error_payload(
@@ -266,7 +267,7 @@ def test_refresh_token_with_rotation(
     proxy_url: str = None,
     *,
     tenant: str = "common",
-    scope: str = DEFAULT_GRAPH_SCOPE,
+    scope: str | None = None,
     max_retries: int = 3,
 ) -> tuple[bool, str | None, str | None]:
     """测试 refresh token 是否有效；如服务端返回新的 refresh_token，则一并返回（用于滚动更新）。
@@ -274,14 +275,15 @@ def test_refresh_token_with_rotation(
     import time
 
     proxies = build_proxies(proxy_url)
-    resolved_scope = (scope or DEFAULT_GRAPH_SCOPE).strip() or DEFAULT_GRAPH_SCOPE
+    resolved_scope = (scope or "").strip()
     url = build_token_url(tenant)
     data = {
         "client_id": client_id,
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
-        "scope": resolved_scope,
     }
+    if resolved_scope:
+        data["scope"] = resolved_scope
     client_secret = settings_repo.get_oauth_client_secret_for_client(client_id)
     if client_secret:
         data["client_secret"] = client_secret
@@ -289,13 +291,16 @@ def test_refresh_token_with_rotation(
     last_error_msg = None
     for attempt in range(max_retries + 1):
         try:
-            res = requests.post(url, data=data, timeout=15, proxies=proxies)
+            res = post_refresh_token(url, data=data, timeout=15, proxies=proxies)
 
             if res.status_code == 200:
                 try:
                     payload = res.json()
                 except Exception:
                     payload = {}
+                access_token = payload.get("access_token") if isinstance(payload, dict) else None
+                if not isinstance(access_token, str) or not access_token.strip():
+                    return False, "获取访问令牌失败：响应缺少 access_token", None
                 new_refresh_token = payload.get("refresh_token")
                 return True, None, new_refresh_token
 

@@ -65,7 +65,7 @@ class TestImapTokenCache(unittest.TestCase):
             pass
 
     # T-01: 首次调用 → 请求 MS endpoint
-    @patch("outlook_web.services.imap.requests.post")
+    @patch("outlook_web.services.oauth_refresh.requests.post")
     def test_first_call_fetches_from_endpoint(self, mock_post):
         from outlook_web.services.imap import get_access_token_imap_result
 
@@ -78,7 +78,7 @@ class TestImapTokenCache(unittest.TestCase):
         self.assertEqual(mock_post.call_count, 1)
 
     # T-02: 二次调用 → 命中缓存，不再请求
-    @patch("outlook_web.services.imap.requests.post")
+    @patch("outlook_web.services.oauth_refresh.requests.post")
     def test_second_call_returns_cached_token(self, mock_post):
         from outlook_web.services.imap import get_access_token_imap_result
 
@@ -93,7 +93,7 @@ class TestImapTokenCache(unittest.TestCase):
         self.assertEqual(mock_post.call_count, 1)
 
     # T-03: 过期后调用 → 重新请求
-    @patch("outlook_web.services.imap.requests.post")
+    @patch("outlook_web.services.oauth_refresh.requests.post")
     @patch("outlook_web.services.imap.time.monotonic")
     def test_expired_token_refetches(self, mock_time, mock_post):
         from outlook_web.services.imap import get_access_token_imap_result
@@ -115,7 +115,7 @@ class TestImapTokenCache(unittest.TestCase):
         self.assertEqual(mock_post.call_count, 2)
 
     # T-04: 不同 refresh_token → 各自独立缓存
-    @patch("outlook_web.services.imap.requests.post")
+    @patch("outlook_web.services.oauth_refresh.requests.post")
     def test_different_refresh_token_separate_cache(self, mock_post):
         from outlook_web.services.imap import get_access_token_imap_result
 
@@ -132,7 +132,7 @@ class TestImapTokenCache(unittest.TestCase):
         self.assertEqual(mock_post.call_count, 2)
 
     # T-05: 不同 client_id → 各自独立缓存
-    @patch("outlook_web.services.imap.requests.post")
+    @patch("outlook_web.services.oauth_refresh.requests.post")
     def test_different_client_id_separate_cache(self, mock_post):
         from outlook_web.services.imap import get_access_token_imap_result
 
@@ -149,7 +149,7 @@ class TestImapTokenCache(unittest.TestCase):
         self.assertEqual(mock_post.call_count, 2)
 
     # T-06: 手动清除后重新请求
-    @patch("outlook_web.services.imap.requests.post")
+    @patch("outlook_web.services.oauth_refresh.requests.post")
     def test_clear_cache_forces_refetch(self, mock_post):
         from outlook_web.services.imap import (
             clear_imap_token_cache,
@@ -168,7 +168,7 @@ class TestImapTokenCache(unittest.TestCase):
         self.assertEqual(mock_post.call_count, 2)
 
     # T-07: refresh_token 轮换 → 旧缓存不命中
-    @patch("outlook_web.services.imap.requests.post")
+    @patch("outlook_web.services.oauth_refresh.requests.post")
     def test_rotated_refresh_token_misses_cache(self, mock_post):
         from outlook_web.services.imap import get_access_token_imap_result
 
@@ -184,7 +184,7 @@ class TestImapTokenCache(unittest.TestCase):
         self.assertEqual(mock_post.call_count, 2)
 
     # T-08: endpoint 返回失败 → 不写入缓存
-    @patch("outlook_web.services.imap.requests.post")
+    @patch("outlook_web.services.oauth_refresh.requests.post")
     def test_endpoint_failure_not_cached(self, mock_post):
         from outlook_web.services.imap import get_access_token_imap_result
 
