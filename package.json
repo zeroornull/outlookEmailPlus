@@ -7,8 +7,9 @@
     "doc": "docs",
     "test": "tests"
   },
+  "packageManager": "pnpm@10.34.9",
   "scripts": {
-    "test": "echo \"Use a scoped test script, for example: npm run test:browser-extension\" && exit 1",
+    "test": "echo \"Use a scoped test script, for example: pnpm run test:browser-extension\" && exit 1",
     "test:browser-extension": "jest --runInBand --config tests/browser-extension/jest.config.js"
   },
   "keywords": [],

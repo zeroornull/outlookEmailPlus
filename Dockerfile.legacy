@@ -14,6 +14,7 @@
 
 # 使用 Python 3.11 作为基础镜像
 FROM python:3.11-slim
+COPY --from=ghcr.io/astral-sh/uv:0.13.9 /uv /uvx /bin/
 
 # 设置工作目录
 WORKDIR /app
@@ -21,19 +22,20 @@ WORKDIR /app
 # 设置环境变量（SPA_ENABLED=false：禁止服务任何 SPA 产物，固定旧前端）
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_LINK_MODE=copy \
+    PATH="/app/.venv/bin:$PATH" \
     GUNICORN_WORKERS=1 \
     GUNICORN_THREADS=8 \
     GUNICORN_TIMEOUT=120 \
     SPA_ENABLED=false
 
 # 复制依赖文件
-COPY requirements.txt .
+COPY pyproject.toml uv.lock ./
 
-# 安装依赖（pip 走国内镜像加速）
-RUN pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple && \
-    pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple && \
-    pip install gunicorn -i https://pypi.tuna.tsinghua.edu.cn/simple
+# 安装锁定的生产依赖，复用下载缓存
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-install-project
 
 # 复制应用代码（.dockerignore 已排除 node_modules/** 与 **/dist/）
 COPY . .

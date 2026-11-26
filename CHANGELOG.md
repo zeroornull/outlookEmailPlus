@@ -10,6 +10,10 @@ All notable changes to OutlookMail Plus are documented in this file.
 - **Token 工具指引与保存 Scope**：区分 Azure Web 与 Mobile and desktop applications 平台配置；新前端写入账号时传递授权 Scope，避免保存验证使用错误的 Scope。
 - **Token 按邮箱保存**：默认按邮箱保存，邮箱已存在时先验证新 Token 再更新凭据并恢复启用，不存在时创建账号；验证失败保留原凭据，更新时保留密码、分组、标签和备注等信息。仍可选择已有账号更新，两套前端按实际保存结果提示创建或更新。
 
+### 优化 / Improvements
+
+- **CI 镜像构建提速**：amd64 与 arm64 使用原生 runner 并行构建后合并多架构镜像；前端使用固定版本 pnpm 与锁文件缓存依赖并在构建平台生成静态资源，Python 使用固定版本 uv 与锁文件同步项目虚拟环境，复用 BuildKit 依赖缓存以减少重复安装。
+
 ## [v2.9.11] - 2026-08-24
 
 ### 修复 / Bug Fixes

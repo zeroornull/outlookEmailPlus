@@ -4,18 +4,25 @@
   "private": true,
   "description": "OutlookEmail Plus SPA frontend (Ant Design Pro)",
   "repository": "git@github.com:ZeroPointSix/outlookEmailPlus.git",
+  "packageManager": "pnpm@10.34.9",
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"],
+    "overrides": {
+      "@umijs/plugins>@ant-design/pro-components": "$@ant-design/pro-components"
+    }
+  },
   "scripts": {
     "analyze": "cross-env ANALYZE=1 max build",
     "build": "max build",
     "deploy": "cross-env CI=true max build && gh-pages -d dist",
     "dev": "cross-env UMI_ENV=dev MOCK=none max dev",
     "i18n-remove": "node scripts/i18n-remove.js",
-    "lint": "npm run biome:lint && npm run tsc",
+    "lint": "pnpm run biome:lint && pnpm run tsc",
     "lint-staged": "lint-staged",
     "biome:lint": "biome lint",
     "biome": "biome check --write",
     "openapi": "max openapi",
-    "prepare": "npx husky && max setup",
+    "prepare": "pnpm exec husky && pnpm exec max setup",
     "preview": "max preview --port 8000",
     "preview:build": "max build && max preview --port 8000",
     "record": "cross-env NODE_ENV=development UMI_ENV=test max record --scene=login",
@@ -77,11 +84,6 @@
     "ts-node": "^10.9.2",
     "typescript": "^7.0.2",
     "vitest": "4.1.8"
-  },
-  "overrides": {
-    "@umijs/plugins": {
-      "@ant-design/pro-components": "$@ant-design/pro-components"
-    }
   },
   "engines": {
     "node": ">=22.0.0"

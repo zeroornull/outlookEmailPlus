@@ -6,7 +6,11 @@ on:
     paths:
       - '**.py'
       - 'pyproject.toml'
-      - 'requirements.txt'
+      - 'uv.lock'
+      - '.python-version'
+      - 'ant-design-pro/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
       - 'Dockerfile'
       - 'templates/**'
       - 'static/**'

@@ -16,15 +16,25 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.13.9"
+          python-version: "3.11"
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
       - name: Verify release version alignment
         env:
           GITHUB_REF: ${{ github.ref }}
-        run: python scripts/check_release_version.py
+        run: uv run --no-project --python 3.11 python scripts/check_release_version.py
 
       - name: Extract release notes from CHANGELOG.md
         shell: bash
         run: |
-          python - <<'PY'
+          uv run --no-project --python 3.11 python - <<'PY'
           import re
           import sys
           from pathlib import Path

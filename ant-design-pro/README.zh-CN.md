@@ -89,14 +89,15 @@ cd myapp
 ### 安装依赖
 
 ```bash
-npm install
+corepack enable
+pnpm install --frozen-lockfile
 ```
 
 ### 开发
 
 ```bash
 # 启动开发服务器（默认为完整版）
-npm start
+pnpm start
 ```
 
 ### 精简为简单版本
@@ -104,7 +105,7 @@ npm start
 本项目默认包含所有区块。如果你需要一个最小化的版本，运行：
 
 ```bash
-npm run simple
+pnpm run simple
 ```
 
 这将会：
@@ -118,7 +119,7 @@ npm run simple
 ### 构建
 
 ```bash
-npm run build
+pnpm run build
 ```
 
 更多信息请参考 [使用文档](./docs/cheatsheet.zh-CN.md)。

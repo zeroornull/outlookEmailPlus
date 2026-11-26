@@ -28,7 +28,7 @@ case "$ACTION" in
   start)
     wait_started
     # 镜像内没有 pgrep，用 /healthz 探测是否已在运行
-    daytona exec "$SANDBOX_NAME" -- bash -lc 'cd /app && mkdir -p data && if ! python3 -c "import urllib.request as u; u.urlopen(\"http://127.0.0.1:'"$PORT"'/healthz\", timeout=2)" >/dev/null 2>&1; then nohup scripts/start-gunicorn.sh > /tmp/oemp-app.log 2>&1 & fi; sleep 6; python3 -c "import urllib.request as u; print(\"healthz\", u.urlopen(\"http://127.0.0.1:'"$PORT"'/healthz\", timeout=5).status)"'
+    daytona exec "$SANDBOX_NAME" -- bash -lc 'cd /app && mkdir -p data && if ! uv run --frozen --no-dev python -c "import urllib.request as u; u.urlopen(\"http://127.0.0.1:'"$PORT"'/healthz\", timeout=2)" >/dev/null 2>&1; then nohup uv run --frozen --no-dev scripts/start-gunicorn.sh > /tmp/oemp-app.log 2>&1 & fi; sleep 6; uv run --frozen --no-dev python -c "import urllib.request as u; print(\"healthz\", u.urlopen(\"http://127.0.0.1:'"$PORT"'/healthz\", timeout=5).status)"'
     echo "预览地址（24 小时有效）:"
     daytona preview-url "$SANDBOX_NAME" -p "$PORT" --expires 86400
     ;;

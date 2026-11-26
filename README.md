@@ -213,7 +213,7 @@ networks:
 说明：
 
 - 建议始终挂载 `data/`，避免数据库与运行数据丢失
-- `SECRET_KEY` 必须稳定且足够强，建议随机64位：`python -c "import secrets; print(secrets.token_hex(32))"`
+- `SECRET_KEY` 必须稳定且足够强，建议随机64位：`uv run --frozen python -c "import secrets; print(secrets.token_hex(32))"`
 - `WATCHTOWER_HTTP_API_TOKEN` **可留空**，留空时 app 和 watchtower 自动使用同一内置默认值，部署后一键更新即可使用
 - 配置好后，当有新版本时系统界面会自动弹出更新提示，点击"立即更新"即可完成升级
 - 一键更新功能**仅在 docker-compose 部署方式下有效**；`docker run` 单容器模式不支持
@@ -241,16 +241,47 @@ networks:
 
 ### 本地运行
 
+先安装 [uv](https://docs.astral.sh/uv/getting-started/installation/)（CI 使用 `0.13.9`）。项目使用 Python 3.11，`uv sync` 会按 `.python-version` 创建或重建 `.venv`，无需手动激活；运行和开发依赖由 `pyproject.toml` 声明，`uv.lock` 锁定具体版本。
+
 ```bash
-python -m venv .venv
-pip install -r requirements.txt
-python web_outlook_app.py
+uv sync --frozen
+uv run --frozen python web_outlook_app.py
 ```
 
 ### 运行测试
 
 ```bash
-python -m unittest discover -s tests -v
+uv run --frozen python -m unittest discover -s tests -v
+```
+
+### 依赖与前端开发
+
+`uv sync --frozen` 默认包含 `dev` 依赖组（coverage、flake8、black、isort、mypy、bandit 和 PyYAML）。仅安装运行依赖时使用 `uv sync --frozen --no-dev`。
+
+```bash
+uv add <package>                 # 修改运行依赖并更新 uv.lock
+uv add --group dev <package>     # 添加开发工具
+uv lock --upgrade-package <package>
+uv sync --frozen
+uv run --frozen coverage run -m unittest discover -s tests -v
+uv run --frozen coverage report
+```
+
+发布时请同步更新 `outlook_web.__version__`、`pyproject.toml` 的 `project.version` 和 `uv.lock`；发布检查会校验它们与版本标签的一致性。
+
+前端使用 Node.js 22 和 pnpm `10.34.9`。先启用 Corepack 并安装固定版本，然后分别在根目录和 `ant-design-pro/` 安装各自锁定的依赖：
+
+```bash
+corepack enable
+corepack prepare pnpm@10.34.9 --activate
+pnpm install --frozen-lockfile
+pnpm run test:browser-extension
+cd ant-design-pro
+pnpm install --frozen-lockfile
+pnpm run dev
+# 类型检查与生产构建
+pnpm run tsc
+pnpm run build
 ```
 
 ## 常用环境变量

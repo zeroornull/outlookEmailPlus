@@ -209,7 +209,7 @@ networks:
 Notes:
 
 - Always mount `data/` to avoid losing the database and runtime data
-- `SECRET_KEY` must stay stable and strong; generate a random 64-char value: `python -c "import secrets; print(secrets.token_hex(32))"`
+- `SECRET_KEY` must stay stable and strong; generate a random 64-char value: `uv run --frozen python -c "import secrets; print(secrets.token_hex(32))"`
 - `WATCHTOWER_HTTP_API_TOKEN` **can be left empty** — both app and watchtower will automatically use the same built-in default, making one-click update work out of the box; for production, use a random strong password
 - Once configured, the UI will show an update banner when a new version is detected; click "Update Now" to upgrade
 - One-click update **only works with docker-compose deployment**; `docker run` single-container mode is not supported
@@ -237,16 +237,47 @@ Notes:
 
 ### Local Run
 
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) first (CI uses `0.13.9`). The project uses Python 3.11; `uv sync` creates or rebuilds `.venv` according to `.python-version`, without manual activation. `pyproject.toml` declares runtime and development dependencies, and `uv.lock` pins their resolved versions.
+
 ```bash
-python -m venv .venv
-pip install -r requirements.txt
-python web_outlook_app.py
+uv sync --frozen
+uv run --frozen python web_outlook_app.py
 ```
 
 ### Run Tests
 
 ```bash
-python -m unittest discover -s tests -v
+uv run --frozen python -m unittest discover -s tests -v
+```
+
+### Dependency and Frontend Development
+
+`uv sync --frozen` includes the `dev` dependency group by default (coverage, flake8, black, isort, mypy, bandit, and PyYAML). Use `uv sync --frozen --no-dev` to install runtime dependencies only.
+
+```bash
+uv add <package>                 # Update runtime dependencies and uv.lock
+uv add --group dev <package>     # Add a development tool
+uv lock --upgrade-package <package>
+uv sync --frozen
+uv run --frozen coverage run -m unittest discover -s tests -v
+uv run --frozen coverage report
+```
+
+For releases, update `outlook_web.__version__`, `project.version` in `pyproject.toml`, and `uv.lock` together. The release gate checks version alignment with the release tag.
+
+Frontend development uses Node.js 22 and pnpm `10.34.9`. Enable Corepack and install the pinned version, then install each package's locked dependencies in the root and `ant-design-pro/` separately:
+
+```bash
+corepack enable
+corepack prepare pnpm@10.34.9 --activate
+pnpm install --frozen-lockfile
+pnpm run test:browser-extension
+cd ant-design-pro
+pnpm install --frozen-lockfile
+pnpm run dev
+# Type checking and production build
+pnpm run tsc
+pnpm run build
 ```
 
 ## Common Environment Variables

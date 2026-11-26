@@ -90,14 +90,15 @@ cd myapp
 ### Installation
 
 ```bash
-npm install
+corepack enable
+pnpm install --frozen-lockfile
 ```
 
 ### Development
 
 ```bash
 # Start development server (full version by default)
-npm start
+pnpm start
 ```
 
 ### Simplify to Simple Version
@@ -105,7 +106,7 @@ npm start
 This project includes all blocks by default. If you need a minimal version, run:
 
 ```bash
-npm run simple
+pnpm run simple
 ```
 
 This will:
@@ -119,7 +120,7 @@ This will:
 ### Build
 
 ```bash
-npm run build
+pnpm run build
 ```
 
 ## AI Skills (Claude Code)

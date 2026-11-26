@@ -3,6 +3,7 @@
 
 When GITHUB_REF is refs/tags/vX.Y.Z, verifies:
   - outlook_web.__version__ matches the tag (without ``v`` prefix)
+  - pyproject.toml project.version matches the app and tag
   - CHANGELOG.md contains ``## [vX.Y.Z] - ...``
 
 Non-tag refs (main/dev/PR) exit 0 without checks.
@@ -10,14 +11,14 @@ Non-tag refs (main/dev/PR) exit 0 without checks.
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
 
 _SEMVER_TAG_RE = re.compile(r"^v(\d+\.\d+\.\d+)(?:[._-].*)?$")
 
@@ -33,10 +34,38 @@ def _expected_version_from_ref(ref: str) -> str | None:
 
 
 def check_app_version(expected: str) -> list[str]:
-    from outlook_web import __version__
+    app_source = _REPO_ROOT / "outlook_web" / "__init__.py"
+    try:
+        module = ast.parse(app_source.read_text(encoding="utf-8"), filename=str(app_source))
+    except (OSError, SyntaxError) as exc:
+        return [f"Cannot read outlook_web.__version__: {exc}"]
 
-    if __version__ != expected:
-        return [f"outlook_web.__version__ is {__version__!r}, expected {expected!r} (from git tag)"]
+    version = None
+    for statement in module.body:
+        if isinstance(statement, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "__version__" for target in statement.targets
+        ):
+            if isinstance(statement.value, ast.Constant) and isinstance(statement.value.value, str):
+                version = statement.value.value
+            break
+
+    if version is None:
+        return ["outlook_web.__version__ must be a literal string assignment"]
+    if version != expected:
+        return [f"outlook_web.__version__ is {version!r}, expected {expected!r} (from git tag)"]
+    return []
+
+
+def check_project_version(expected: str) -> list[str]:
+    try:
+        with (_REPO_ROOT / "pyproject.toml").open("rb") as project_file:
+            project = tomllib.load(project_file)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        return [f"Cannot read pyproject.toml: {exc}"]
+
+    version = project.get("project", {}).get("version")
+    if version != expected:
+        return [f"pyproject.toml project.version is {version!r}, expected {expected!r} (from git tag)"]
     return []
 
 
@@ -60,6 +89,7 @@ def run_checks(ref: str | None = None) -> list[str]:
     tag = ref.removeprefix("refs/tags/")
     errors: list[str] = []
     errors.extend(check_app_version(expected))
+    errors.extend(check_project_version(expected))
     errors.extend(check_changelog(tag))
     return errors
 
@@ -78,7 +108,7 @@ def main() -> int:
             print(f"ERROR: {err}", file=sys.stderr)
         return 1
 
-    print(f"OK: __version__={expected} and CHANGELOG.md section [{tag}] are aligned")
+    print(f"OK: __version__={expected}, pyproject.toml project.version and CHANGELOG.md section [{tag}] are aligned")
     return 0
 
 

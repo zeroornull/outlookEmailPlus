@@ -12,17 +12,20 @@
 
 ```bash
 # 终端 1：后端
-python start.py
+uv run --frozen start.py
 # 或
-python web_outlook_app.py
+uv run --frozen web_outlook_app.py
 
 # 终端 2：前端
 cd ant-design-pro
-npm install
-npm start
+corepack enable
+pnpm install --frozen-lockfile
+pnpm start
 ```
 
 浏览器打开 `http://localhost:8000`。
+
+使用 Node >= 22 和 `packageManager` 固定的 pnpm 10.34.9。常规安装会执行 `prepare`（Husky 与 Umi setup）。CI/镜像可先用 `pnpm install --frozen-lockfile --ignore-scripts` 缓存依赖，源码复制完成后设置 `HUSKY=0`，执行 `pnpm rebuild` 和 `pnpm exec max setup`，最后构建。依赖构建脚本只允许 `esbuild`；`.npmrc` 保持 hoisted 布局兼容原有 Umi 依赖。
 
 环境变量（可选）：
 
@@ -68,21 +71,21 @@ npm start
 
 ```bash
 cd ant-design-pro
-npm install
-npm run build          # 产出 dist/
-npm run preview        # 本地预览 dist，默认 :8000
+pnpm install --frozen-lockfile
+pnpm run build          # 产出 dist/
+pnpm run preview        # 本地预览 dist，默认 :8000
 ```
 
 联调方式（二选一）：
 
-1. **开发双进程**（推荐迁移期）：Flask `:5000` + `npm start` `:8000`，依赖 `config/proxy.ts`
+1. **开发双进程**（推荐迁移期）：Flask `:5000` + `pnpm start` `:8000`，依赖 `config/proxy.ts`
 2. **静态资源挂载**：将 `dist/` 交给 Nginx/Caddy，`/api` `/login` `/logout` `/img` `/healthz` 反代到 Flask；SPA fallback 到 `index.html`
 
 注意：
 
 - 生产环境 **Umi proxy 不生效**，必须在网关层做同源反代，否则 cookie/CSRF 跨域会失败
 - Flask 仍可独立服务旧 `templates/` 前端；新旧前端可并行，直到 SPA 验收完成
-- 契约回归：`python -m unittest tests.test_auth_spa_adapters tests.test_overview_api_contract tests.test_accounts_groups_api_contract tests.test_emails_api_contract tests.test_temp_emails_plugins_api_contract tests.test_p5_api_contract -v`
+- 契约回归：`uv run --frozen python -m unittest tests.test_auth_spa_adapters tests.test_overview_api_contract tests.test_accounts_groups_api_contract tests.test_emails_api_contract tests.test_temp_emails_plugins_api_contract tests.test_p5_api_contract -v`
 
 ## 残余差距 / 下线旧前端策略
 
@@ -135,5 +138,5 @@ npm run preview        # 本地预览 dist，默认 :8000
 
 - 不要手改 `src/services/ant-design-pro/`（openapi 生成目录）；业务 API 写在 `src/services/outlook/`
 - Node >= 22
-- `npm run simple` 不可逆，本项目不要执行
+- `pnpm run simple` 不可逆，本项目不要执行
 - 审查修复（P5 后）：pool-admin 契约对齐、token-tool 代理收敛、HTTP 错误体规范化
