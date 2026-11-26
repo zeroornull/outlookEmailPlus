@@ -94,6 +94,19 @@ kubectl --context default -n dev get deployment outlook-email-plus -o jsonpath="
 
 完整 Microsoft 登录至自动写库的生产流程仍需账号持有人完成 Microsoft 登录与安全验证；本次未代替持有人完成新的授权。
 
+## 2026-11-26 账号健康状态部署
+
+| 项目 | 记录 |
+| --- | --- |
+| 分支 | `fix/oauth-client-secret` |
+| Git commit | `9ede6547bee0cc5ea9f8cd668f4635b845c4f39f` |
+| Actions | [45857223320](https://github.com/zeroornull/outlookEmailPlus/actions/runs/45857223320)，SPA、amd64、arm64 与多架构合并全部成功 |
+| 镜像 | `ghcr.io/zeroornull/outlook-email-plus@sha256:06f05bca552258c50af8ae7a396caa5d4d348c32084f48c18818384cd5b68076` |
+| 上一镜像 | `ghcr.io/zeroornull/outlook-email-plus@sha256:287186891f8bafcb1c74143fbd153bb2acde078e15b86768d86ee4e3a1d13e72`（Token 自动导入） |
+| 部署前备份 | `/app/data/outlook_accounts.db.20261126T161857061588Z-fc661936a7fb4e49983f19ada39c508f.bak`，3080192 字节 |
+| 部署结果 | server dry-run、rollout、镜像 digest 核对通过；公网健康检查 HTTP 200、`status=ok` |
+| 验证 | 概览修复、覆盖导入待验证状态与账号健康状态合并发布；76 项后端定向测试、SPA TypeScript、13 项状态标签测试与旧前端语法检查通过；线上 `/api/accounts` 返回 `health_status`，账号管理页把最近刷新失败的账号显示为“授权过期”，不再显示“正常”，概览统计为 62 个授权过期 / 64 个活跃 |
+
 ## 每日 Token 刷新
 
 线上已设置 `enable_scheduled_refresh=true`、`use_cron_schedule=false`、`refresh_interval_days=1`。现有任务每天北京时间 02:00 检查刷新，执行时读取数据库中的周期，无需为这项配置重启服务。
