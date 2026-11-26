@@ -49,6 +49,23 @@ def get_access_token_graph_result(client_id: str, refresh_token: str, proxy_url:
 
         if res.status_code != 200:
             details = get_response_details(res)
+            if res.status_code == 400 and isinstance(details, dict) and details.get("error") == "invalid_request":
+                description = details.get("error_description")
+                codes = details.get("error_codes")
+                has_permission_code = isinstance(codes, list) and any(code in (90023, "90023") for code in codes)
+                if (
+                    isinstance(description, str)
+                    and (has_permission_code or "aadsts90023:" in description.lower())
+                    and "no applicable permissions" in description.lower()
+                ):
+                    # .default may omit historical dynamic grants; Microsoft still validates Mail.Read consent.
+                    mail_data = data.copy()
+                    mail_data["scope"] = "https://graph.microsoft.com/Mail.Read"
+                    res = post_refresh_token(TOKEN_URL_GRAPH, data=mail_data, timeout=30, proxies=proxies)
+                    if res.status_code != 200:
+                        details = get_response_details(res)
+
+        if res.status_code != 200:
             return {
                 "success": False,
                 "error": build_error_payload(

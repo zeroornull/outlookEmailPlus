@@ -4,7 +4,7 @@
 
 ## 2026-11-26：线上邮箱刷新排障补充
 
-- `AADSTS90023: No applicable permissions were found for this user.` 不等于 refresh token 已过期。只有 IMAP 授权的账号，强行请求 Graph `.default` 会失败；通用刷新现在省略 `scope`，沿用原授权范围。实际读信仍分别请求 Graph 或 IMAP 所需权限，并使用现有渠道回退。
+- `AADSTS90023: No applicable permissions were found for this user.` 不等于 refresh token 已过期。IMAP 导入账号或应用静态权限未包含 Graph 的历史授权，强行请求 Graph `.default` 可能失败；通用刷新现在省略 `scope`，沿用原授权范围。实际 Graph 读信仅在收到这一明确错误时尝试显式 `https://graph.microsoft.com/Mail.Read`，由微软校验已有授权；仍不能使用时再走现有 IMAP 渠道回退。
 - `AADSTS90023: Public clients can't send a client secret.` 表示当前授权属于公共客户端。仅收到微软这一明确拒绝时，服务端才移除本次请求的 secret 重发一次；不会清空环境变量，也不会把同一 Client ID 的其他机密授权改为公共客户端。
 - `AADSTS70002` 要求 `client_secret` 时仍使用与 Client ID 精确绑定的服务端 secret。一个 Client ID 可以同时存在需要 secret 和不接受 secret 的历史授权。
 - `AADSTS70000` 若在 Graph、IMAP 请求中均明确返回授权已过期、必须重新登录，调整 scope 或 secret 无法恢复，需要重新完成微软登录授权；不要用盲目重试掩盖真实失败。

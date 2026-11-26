@@ -140,5 +140,104 @@ class TestGraphPermissionPrecheck(unittest.TestCase):
         mock_get.assert_called_once()
 
 
+class TestGraphGrantedScopeRecovery(unittest.TestCase):
+    def setUp(self):
+        secret = patch("outlook_web.services.graph.settings_repo.get_oauth_client_secret_for_client", return_value="secret")
+        secret.start()
+        self.addCleanup(secret.stop)
+
+    @staticmethod
+    def rejection(status=400, error="invalid_request", description="AADSTS90023: No applicable permissions found.", codes=None):
+        response = _make_error_response(status)
+        response.json.return_value = {
+            "error": error,
+            "error_description": description,
+            "error_codes": [90023] if codes is None else codes,
+        }
+        return response
+
+    @patch("outlook_web.services.oauth_refresh.requests.post")
+    def test_recovers_existing_mail_grant_and_preserves_request_and_rotation(self, post):
+        from outlook_web.services import graph
+
+        for codes, description in (([90023], "No applicable permissions found."),
+                                   (["90023"], "No applicable permissions found."),
+                                   ([], "AADSTS90023: No applicable permissions found.")):
+            with self.subTest(codes=codes, description=description):
+                post.reset_mock()
+                post.side_effect = [self.rejection(codes=codes, description=description),
+                                    _make_graph_token_response("mail-token", "Mail.Read", "rotated")]
+                result = graph.get_access_token_graph_result("cid", "rt", "http://proxy")
+                self.assertEqual(result, {"success": True, "access_token": "mail-token",
+                                          "refresh_token": "rotated", "new_refresh_token": "rotated", "scope": "Mail.Read"})
+                self.assertEqual(post.call_count, 2)
+                first, second = post.call_args_list
+                self.assertEqual(first.args, (graph.TOKEN_URL_GRAPH,))
+                self.assertEqual(second.args, first.args)
+                self.assertEqual(first.kwargs["data"], {"client_id": "cid", "grant_type": "refresh_token",
+                                                       "refresh_token": "rt", "scope": graph.DEFAULT_GRAPH_SCOPE,
+                                                       "client_secret": "secret"})
+                self.assertIsNot(first.kwargs["data"], second.kwargs["data"])
+                self.assertEqual(second.kwargs["data"], dict(first.kwargs["data"], scope="https://graph.microsoft.com/Mail.Read"))
+                for request in (first, second):
+                    self.assertEqual(request.kwargs["timeout"], 30)
+                    self.assertEqual(request.kwargs["proxies"], {"http": "http://proxy", "https": "http://proxy"})
+
+    @patch("outlook_web.services.oauth_refresh.requests.post")
+    def test_other_failures_do_not_request_mail_scope(self, post):
+        from outlook_web.services.graph import get_access_token_graph_result
+
+        failures = [self.rejection(status=401), self.rejection(status=429),
+                    self.rejection(error="invalid_grant", description="AADSTS70000: Refresh token expired."),
+                    self.rejection(error="invalid_client"),
+                    self.rejection(description="AADSTS90023: Other public client error."),
+                    self.rejection(codes=[70000], description="No applicable permissions found."),
+                    self.rejection(description="AADSTS9002331: No applicable permissions found.", codes=[])]
+        for response in failures:
+            with self.subTest(payload=response.json.return_value, status=response.status_code):
+                post.reset_mock()
+                post.side_effect = None
+                post.return_value = response
+                result = get_access_token_graph_result("cid", "rt")
+                self.assertFalse(result["success"])
+                post.assert_called_once()
+
+    @patch("outlook_web.services.oauth_refresh.requests.post")
+    def test_fallback_failure_reports_final_response_without_another_scope_retry(self, post):
+        from outlook_web.services.graph import get_access_token_graph_result
+
+        final = self.rejection(error="invalid_grant", description="AADSTS70000: Explicit grant expired.")
+        post.side_effect = [self.rejection(), final]
+        result = get_access_token_graph_result("cid", "rt")
+        self.assertFalse(result["success"])
+        self.assertIn("AADSTS70000: Explicit grant expired.", str(result["error"]))
+        self.assertNotIn("No applicable permissions", str(result["error"]))
+        self.assertEqual(post.call_count, 2)
+
+    @patch("outlook_web.services.graph.requests.get")
+    @patch("outlook_web.services.oauth_refresh.requests.post")
+    def test_recovered_grant_reads_messages_and_returns_rotation(self, post, get):
+        from outlook_web.services.graph import get_emails_graph
+
+        post.side_effect = [self.rejection(), _make_graph_token_response("mail-token", "Mail.Read", "rotated")]
+        get.return_value.status_code = 200
+        get.return_value.json.return_value = {"value": [{"id": "message"}]}
+        result = get_emails_graph("cid", "rt")
+        self.assertEqual(result, {"success": True, "emails": [{"id": "message"}], "new_refresh_token": "rotated"})
+        self.assertEqual(get.call_args.kwargs["headers"]["Authorization"], "Bearer mail-token")
+
+    @patch("outlook_web.services.oauth_refresh.requests.post")
+    def test_explicit_scope_keeps_public_client_secret_correction(self, post):
+        from outlook_web.services.graph import get_access_token_graph_result
+
+        public_error = self.rejection(description="AADSTS90023: Public clients can't send a client secret.")
+        post.side_effect = [self.rejection(), public_error, _make_graph_token_response("mail-token", "Mail.Read")]
+        self.assertTrue(get_access_token_graph_result("cid", "rt")["success"])
+        self.assertEqual(post.call_count, 3)
+        explicit, public = post.call_args_list[1:]
+        self.assertEqual(explicit.kwargs["data"]["scope"], "https://graph.microsoft.com/Mail.Read")
+        self.assertEqual(public.kwargs["data"], {key: value for key, value in explicit.kwargs["data"].items() if key != "client_secret"})
+
+
 if __name__ == "__main__":
     unittest.main()
