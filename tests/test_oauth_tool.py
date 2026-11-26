@@ -78,6 +78,7 @@ class OAuthToolTestBase(unittest.TestCase):
         refresh_token="mock-new-rt",
         expires_in=3600,
         scope="offline_access https://graph.microsoft.com/.default",
+        id_token=None,
     ):
         resp = MagicMock()
         resp.status_code = 200
@@ -88,6 +89,8 @@ class OAuthToolTestBase(unittest.TestCase):
             "scope": scope,
             "token_type": "Bearer",
         }
+        if id_token is not None:
+            resp.json.return_value["id_token"] = id_token
         return resp
 
     @staticmethod
@@ -546,6 +549,9 @@ class OAuthToolApiPrepareTests(OAuthToolTestBase):
             self.assertIn("response_type=code", authorize_url)
             qs = parse_qs(urlparse(authorize_url).query)
             self.assertTrue(qs.get("state", [""])[0])
+            self.assertEqual(set(qs["scope"][0].split()), {
+                "offline_access", "openid", "profile", "email", "https://graph.microsoft.com/.default",
+            })
 
     def test_prepare_invalid_scope_rejected(self):
         with self.app.test_client() as client:
@@ -647,7 +653,9 @@ class OAuthToolApiExchangeTests(OAuthToolTestBase):
     def test_exchange_success(self, mock_post):
         from urllib.parse import parse_qs, urlparse
 
-        mock_post.return_value = self._mock_microsoft_token_response()
+        mock_post.return_value = self._mock_microsoft_token_response(
+            id_token=self._build_jwt({"aud": "cid", "email": "new@oauth-test.com"}),
+        )
         with self.app.test_client() as client:
             self._login(client)
             prep_resp = client.post(
@@ -671,6 +679,178 @@ class OAuthToolApiExchangeTests(OAuthToolTestBase):
             data = exch_resp.get_json()
             self.assertTrue(data.get("success"))
             self.assertEqual(data.get("data", {}).get("refresh_token"), "mock-new-rt")
+            token_data = data["data"]
+            self.assertEqual(token_data["email"], "new@oauth-test.com")
+            self.assertEqual(token_data["account"]["action"], "created")
+            self.assertTrue(token_data["account"]["token_valid"])
+            self.assertNotIn("import_error", token_data)
+            requested_scope = parse_qs(urlparse(authorize_url).query)["scope"][0]
+            self.assertEqual(mock_post.call_args.kwargs["data"]["scope"], requested_scope)
+            self.assertEqual(token_data["requested_scope"], requested_scope)
+            self.assertEqual(mock_post.call_count, 1)
+        with self.app.app_context():
+            from outlook_web.db import get_db
+            from outlook_web.repositories import accounts as accounts_repo
+
+            saved = accounts_repo.get_account_by_email(token_data["email"])
+            self.assertEqual(saved["id"], token_data["account"]["account_id"])
+            self.assertEqual(saved["refresh_token"], "mock-new-rt")
+            self.assertEqual(saved["client_id"], "cid")
+            self.assertNotEqual(get_db().execute("SELECT refresh_token FROM accounts WHERE id = ?", (saved["id"],)).fetchone()[0], "mock-new-rt")
+
+    def _exchange_identity(self, client, claims, **extra):
+        from urllib.parse import parse_qs, urlparse
+
+        response = client.post("/api/token-tool/prepare", json={
+            "client_id": "cid", "scope": "https://outlook.office.com/IMAP.AccessAsUser.All",
+            "redirect_uri": "http://localhost:5000/token-tool/callback",
+        })
+        self.assertEqual(response.status_code, 200)
+        state = parse_qs(urlparse(response.get_json()["data"]["authorize_url"]).query)["state"][0]
+        return client.post("/api/token-tool/exchange", json={
+            "callback_url": f"http://localhost:5000/token-tool/callback?code=code&state={state}",
+            **extra,
+        })
+
+    @patch("outlook_web.services.graph.test_refresh_token_with_rotation")
+    @patch("outlook_web.services.oauth_tool.requests.post")
+    def test_exchange_updates_matching_email_preserving_metadata(self, mock_post, mock_refresh):
+        account_id = self._insert_test_account(email="KeepCase@oauth-test.com")
+        other_id = self._insert_test_account(email="other@oauth-test.com")
+        with self.app.app_context():
+            from outlook_web.db import get_db
+            from outlook_web.repositories import accounts as accounts_repo, tags as tags_repo
+
+            accounts_repo.update_account_credentials(account_id, password="keep-password")
+            db = get_db()
+            db.execute("UPDATE accounts SET status = 'inactive', remark = 'keep remark' WHERE id = ?", (account_id,))
+            db.commit()
+            tag_id = tags_repo.add_tag("auto-keep-" + uuid.uuid4().hex, "#123456")
+            tags_repo.add_account_tag(account_id, tag_id)
+            before = accounts_repo.get_account_by_id(account_id)
+            other_before = accounts_repo.get_account_by_id(other_id)
+            before_tags = tags_repo.get_account_tags(account_id)
+        mock_post.return_value = self._mock_microsoft_token_response(
+            id_token=self._build_jwt({"aud": "cid", "email": "keepcase@oauth-test.com"}),
+        )
+        with self.app.test_client() as client:
+            self._login(client)
+            response = self._exchange_identity(client, None, account_id=other_id, email="other@oauth-test.com")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json()["data"]["account"], {
+                "account_id": account_id, "email": "KeepCase@oauth-test.com", "status": "active",
+                "token_valid": True, "action": "updated",
+            })
+        mock_refresh.assert_not_called()
+        self.assertEqual(mock_post.call_count, 1)
+        with self.app.app_context():
+            after = accounts_repo.get_account_by_id(account_id)
+            self.assertEqual(after["client_id"], "cid")
+            self.assertEqual(after["refresh_token"], "mock-new-rt")
+            self.assertEqual(after["status"], "active")
+            for key in before.keys() - {"client_id", "refresh_token", "status", "updated_at"}:
+                self.assertEqual(after[key], before[key], key)
+            self.assertEqual(tags_repo.get_account_tags(account_id), before_tags)
+            self.assertEqual(accounts_repo.get_account_by_id(other_id), other_before)
+            self.assertEqual(get_db().execute("SELECT COUNT(*) FROM accounts").fetchone()[0], 2)
+
+    @patch("outlook_web.services.oauth_tool.requests.post")
+    def test_exchange_identity_failures_keep_tokens_and_accounts(self, mock_post):
+        account_id = self._insert_test_account()
+        with self.app.app_context():
+            from outlook_web.repositories import accounts as accounts_repo
+
+            before = accounts_repo.get_account_by_id(account_id)
+        for id_token in (None, "malformed", self._build_jwt(["not", "claims"]),
+                         self._build_jwt({"aud": "wrong-client", "email": before["email"]}),
+                         self._build_jwt({"aud": "cid", "preferred_username": "not-a-mailbox"})):
+            with self.subTest(id_token=id_token):
+                mock_post.return_value = self._mock_microsoft_token_response(id_token=id_token)
+                with self.app.test_client() as client:
+                    self._login(client)
+                    response = self._exchange_identity(
+                        client, None, email=before["email"], account_id=account_id,
+                        id_token=self._build_jwt({"aud": "cid", "email": before["email"]}),
+                    )
+                    self.assertEqual(response.status_code, 200)
+                    data = response.get_json()["data"]
+                    self.assertEqual(data["refresh_token"], "mock-new-rt")
+                    self.assertEqual(data["access_token"], "mock-at")
+                    self.assertIn("import_error", data)
+                    self.assertIn("重新发起授权", data["import_error"]["details"])
+                    self.assertNotIn("account", data)
+                with self.app.app_context():
+                    self.assertEqual(accounts_repo.get_account_by_id(account_id), before)
+
+    @patch("outlook_web.services.oauth_tool.requests.post")
+    def test_exchange_uses_email_then_username_and_upn(self, mock_post):
+        for claims, expected in (
+            ({"email": "primary@oauth-test.com", "preferred_username": "other@oauth-test.com"}, "primary@oauth-test.com"),
+            ({"email": "invalid", "preferred_username": "username@oauth-test.com"}, "username@oauth-test.com"),
+            ({"preferred_username": "invalid", "upn": "upn@oauth-test.com"}, "upn@oauth-test.com"),
+        ):
+            with self.subTest(claims=claims):
+                mock_post.return_value = self._mock_microsoft_token_response(id_token=self._build_jwt({"aud": "cid", **claims}))
+                with self.app.test_client() as client:
+                    self._login(client)
+                    response = self._exchange_identity(client, claims)
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.get_json()["data"]["account"]["email"], expected)
+
+    @patch("outlook_web.services.oauth_tool.requests.post")
+    def test_exchange_missing_refresh_token_does_not_write_account(self, mock_post):
+        mock_post.return_value = self._mock_microsoft_token_response(
+            refresh_token="", id_token=self._build_jwt({"aud": "cid", "email": "missing-rt@oauth-test.com"}),
+        )
+        with self.app.test_client() as client:
+            self._login(client)
+            response = self._exchange_identity(client, None)
+            data = response.get_json()["data"]
+            self.assertEqual(data["access_token"], "mock-at")
+            self.assertIn("offline_access", data["import_error"]["details"])
+            self.assertNotIn("account", data)
+        with self.app.app_context():
+            from outlook_web.db import get_db
+
+            self.assertEqual(get_db().execute("SELECT COUNT(*) FROM accounts").fetchone()[0], 0)
+
+    @patch("outlook_web.services.oauth_tool.requests.post")
+    def test_exchange_rejects_provider_type_and_ambiguous_case_conflicts(self, mock_post):
+        for account_type, provider in (("imap", "outlook"), ("outlook", "custom"), ("outlook", "outlook")):
+            email = f"conflict-{account_type}-{provider}@oauth-test.com"
+            account_id = self._insert_test_account(email=email)
+            with self.app.app_context():
+                from outlook_web.repositories import accounts as accounts_repo
+
+                accounts_repo.update_account_credentials(account_id, account_type=account_type, provider=provider)
+                before = accounts_repo.get_account_by_id(account_id)
+            if account_type == provider == "outlook":
+                self._insert_test_account(email=email.upper())
+            mock_post.return_value = self._mock_microsoft_token_response(id_token=self._build_jwt({"aud": "cid", "email": email}))
+            with self.app.test_client() as client:
+                self._login(client)
+                response = self._exchange_identity(client, None)
+                self.assertEqual(response.status_code, 200)
+                data = response.get_json()["data"]
+                self.assertEqual(data["refresh_token"], "mock-new-rt")
+                self.assertIn("import_error", data)
+                self.assertNotIn("account", data)
+            with self.app.app_context():
+                self.assertEqual(accounts_repo.get_account_by_id(account_id), before)
+
+    @patch("outlook_web.controllers.token_tool.accounts_repo.add_account", return_value=False)
+    @patch("outlook_web.services.oauth_tool.requests.post")
+    def test_exchange_storage_failure_keeps_acquired_tokens(self, mock_post, mock_add):
+        mock_post.return_value = self._mock_microsoft_token_response(id_token=self._build_jwt({"aud": "cid", "email": "db-error@oauth-test.com"}))
+        with self.app.test_client() as client:
+            self._login(client)
+            response = self._exchange_identity(client, None)
+            self.assertEqual(response.status_code, 200)
+            data = response.get_json()["data"]
+            self.assertEqual(data["refresh_token"], "mock-new-rt")
+            self.assertEqual(data["access_token"], "mock-at")
+            self.assertIn("import_error", data)
+            self.assertNotIn("account", data)
 
     def test_exchange_missing_state(self):
         with self.app.test_client() as client:
@@ -996,7 +1176,7 @@ class OAuthToolApiSaveTests(OAuthToolTestBase):
             self.assertEqual(accounts_repo.get_account_by_id(account_id), before)
 
     @patch("outlook_web.services.graph.test_refresh_token_with_rotation")
-    def test_save_create_rejects_other_account_types_and_providers(self, mock_test_rt):
+    def test_save_rejects_other_account_types_and_providers(self, mock_test_rt):
         mock_test_rt.return_value = (True, None, "rotated-rt")
         for account_type, provider in (("imap", "outlook"), ("outlook", "custom")):
             with self.subTest(account_type=account_type, provider=provider):
@@ -1009,17 +1189,19 @@ class OAuthToolApiSaveTests(OAuthToolTestBase):
                     before = accounts_repo.get_account_by_id(account_id)
                 with self.app.test_client() as client:
                     self._login(client)
-                    response = client.post("/api/token-tool/save", json={
-                        "mode": "create", "email": email,
-                        "client_id": "replacement-cid", "refresh_token": "replacement-rt",
-                    })
-                    self.assertEqual(response.status_code, 409)
-                    self.assertEqual(response.get_json()["code"], "OAUTH_ACCOUNT_CONFLICT")
+                    for mode in ("create", "update"):
+                        with self.subTest(mode=mode):
+                            response = client.post("/api/token-tool/save", json={
+                                "mode": mode, "email": email, "account_id": account_id,
+                                "client_id": "replacement-cid", "refresh_token": "replacement-rt",
+                            })
+                            self.assertEqual(response.status_code, 409)
+                            self.assertEqual(response.get_json()["code"], "OAUTH_ACCOUNT_CONFLICT")
                 with self.app.app_context():
                     self.assertEqual(accounts_repo.get_account_by_id(account_id), before)
 
     @patch("outlook_web.services.graph.test_refresh_token_with_rotation")
-    def test_save_create_email_matching_remains_case_sensitive(self, mock_test_rt):
+    def test_save_create_matches_email_case_insensitively(self, mock_test_rt):
         mock_test_rt.return_value = (True, None, None)
         account_id = self._insert_test_account(email="Upper@oauth-test.com")
         with self.app.test_client() as client:
@@ -1029,12 +1211,12 @@ class OAuthToolApiSaveTests(OAuthToolTestBase):
                 "client_id": "new-cid", "refresh_token": "new-rt",
             })
             self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.get_json()["data"]["action"], "created")
-            self.assertNotEqual(response.get_json()["data"]["account_id"], account_id)
+            self.assertEqual(response.get_json()["data"]["action"], "updated")
+            self.assertEqual(response.get_json()["data"]["account_id"], account_id)
         with self.app.app_context():
             from outlook_web.repositories import accounts as accounts_repo
 
-            self.assertEqual(accounts_repo.get_account_by_id(account_id)["refresh_token"], "old-rt")
+            self.assertEqual(accounts_repo.get_account_by_id(account_id)["refresh_token"], "new-rt")
 
     @patch.dict("os.environ", {"OAUTH_CLIENT_ID": "server-cid", "OAUTH_CLIENT_SECRET": "server-secret"})
     @patch("outlook_web.services.oauth_refresh.requests.post")

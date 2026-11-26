@@ -1,14 +1,12 @@
 import { PageContainer, ProCard } from '@ant-design/pro-components';
 import {
+  Alert,
   App,
   Button,
   Checkbox,
   Collapse,
   Form,
   Input,
-  Modal,
-  Radio,
-  Select,
   Space,
   Typography,
 } from 'antd';
@@ -16,11 +14,9 @@ import React, { useEffect, useState } from 'react';
 import TokenToolGuide from './TokenToolGuide';
 import {
   exchangeToken,
-  fetchTokenToolAccounts,
   fetchTokenToolConfig,
   pickTokenToolError,
   prepareOAuth,
-  saveTokenToAccount,
   saveTokenToolConfig,
   type TokenResult,
   type TokenToolConfig,
@@ -28,11 +24,11 @@ import {
 import { useIntl } from '@umijs/max';
 
 const DEFAULT_SCOPE =
-  'https://graph.microsoft.com/Mail.Read offline_access openid profile';
+  'https://graph.microsoft.com/Mail.Read offline_access openid profile email';
 
 const SCOPE_PRESETS = {
-  graph: 'offline_access https://graph.microsoft.com/.default',
-  imap: 'offline_access https://outlook.office.com/IMAP.AccessAsUser.All',
+  graph: 'offline_access openid profile email https://graph.microsoft.com/.default',
+  imap: 'offline_access openid profile email https://outlook.office.com/IMAP.AccessAsUser.All',
 } as const;
 
 const TokenToolPage: React.FC = () => {
@@ -43,13 +39,6 @@ const TokenToolPage: React.FC = () => {
   const [authorizeUrl, setAuthorizeUrl] = useState('');
   const [callbackUrl, setCallbackUrl] = useState('');
   const [tokenResult, setTokenResult] = useState<TokenResult | null>(null);
-  const [saveOpen, setSaveOpen] = useState(false);
-  const [saveMode, setSaveMode] = useState<'update' | 'create'>('create');
-  const [accounts, setAccounts] = useState<
-    Array<{ id: number; email: string; status?: string }>
-  >([]);
-  const [accountId, setAccountId] = useState<number | undefined>();
-  const [newEmail, setNewEmail] = useState('');
 
   const loadConfig = async () => {
     setLoading(true);
@@ -147,75 +136,19 @@ const TokenToolPage: React.FC = () => {
         message.error(pickTokenToolError(res, '换取 Token 失败'));
         return;
       }
-      setTokenResult(res.data || null);
-      message.success('Token 换取成功');
-    } catch (error: any) {
-      message.error(
-        pickTokenToolError(error?.response?.data, error?.message || '换取失败'),
-      );
+      const result = res.data || {};
+      setTokenResult(result);
+      if (!result?.import_error && result?.account?.email &&
+          (result.account.action === 'created' || result.account.action === 'updated')) {
+        message.success(`${result.account.email}：${result.account.action === 'created' ? '账号已创建，Token 已导入' : '账号 Token 已更新'}`);
+      }
+    } catch (error: unknown) {
+      message.error(error instanceof Error ? error.message : '换取 Token 失败，请重新授权后重试');
     } finally {
       setLoading(false);
     }
   };
 
-  const openSave = async () => {
-    if (!tokenResult?.refresh_token) {
-      message.error('请先成功换取 Token');
-      return;
-    }
-    setSaveOpen(true);
-    try {
-      const res = await fetchTokenToolAccounts();
-      if (res?.success) {
-        setAccounts(res.data || []);
-      }
-    } catch {
-      // ignore
-    }
-  };
-
-  const confirmSave = async () => {
-    if (!tokenResult?.refresh_token) return;
-    try {
-      const body: any = {
-        mode: saveMode,
-        refresh_token: tokenResult.refresh_token,
-        client_id:
-          tokenResult.client_id || configForm.getFieldValue('client_id'),
-        scope: tokenResult.requested_scope || tokenResult.granted_scope || '',
-      };
-      if (saveMode === 'update') {
-        if (!accountId) {
-          message.error('请选择账号');
-          return;
-        }
-        body.account_id = accountId;
-      } else {
-        if (!newEmail.trim()) {
-          message.error('请输入邮箱地址');
-          return;
-        }
-        body.email = newEmail.trim();
-      }
-      const res = await saveTokenToAccount(body);
-      if (res?.success === false) {
-        message.error(pickTokenToolError(res, '写入失败'));
-        return;
-      }
-      message.success(
-        res.data?.action === 'created'
-          ? '账号已创建，Token 已写入'
-          : res.data?.action === 'updated'
-            ? '账号 Token 已更新'
-            : 'Token 已写入账号',
-      );
-      setSaveOpen(false);
-    } catch (error: any) {
-      message.error(
-        pickTokenToolError(error?.response?.data, error?.message || '写入失败'),
-      );
-    }
-  };
 
   return (
     <PageContainer
@@ -323,9 +256,10 @@ const TokenToolPage: React.FC = () => {
           </ProCard>
         ) : null}
 
-        <ProCard title="粘贴回调 URL 换取 Token" variant="outlined">
+        <ProCard title="粘贴回调 URL 换取 Token 并导入" variant="outlined">
           <Input.TextArea
             rows={3}
+            aria-label="回调 URL"
             placeholder="将浏览器地址栏的回调 URL 粘贴到这里"
             value={callbackUrl}
             onChange={(e) => setCallbackUrl(e.target.value)}
@@ -336,20 +270,31 @@ const TokenToolPage: React.FC = () => {
             loading={loading}
             onClick={() => void onExchange()}
           >
-            换取 Token
+            换取 Token 并导入
           </Button>
         </ProCard>
+        <div role="status" aria-live="polite" aria-atomic="true">
+          {tokenResult ? (
+            tokenResult.import_error || !tokenResult.account?.email ||
+            !['created', 'updated'].includes(tokenResult.account.action) ? (
+              <Alert
+                type="error"
+                showIcon
+                message="Token 已获取，但未导入账号"
+                description={`${tokenResult.import_error?.message || '服务器未确认账号导入结果'}${tokenResult.import_error?.details ? `：${tokenResult.import_error.details}` : ''}。请先复制并妥善保管下方 Token，检查服务器配置和账号导入错误后，重新生成授权链接并授权导入。`}
+              />
+            ) : (
+              <Alert
+                type="success"
+                showIcon
+                message={`${tokenResult.account.email}：${tokenResult.account.action === 'created' ? '账号已创建，Token 已导入' : '账号 Token 已更新'}`}
+              />
+            )
+          ) : null}
+        </div>
 
         {tokenResult ? (
-          <ProCard
-            title="Token 结果"
-            variant="outlined"
-            extra={
-              <Button type="primary" onClick={() => void openSave()}>
-                写入账号
-              </Button>
-            }
-          >
+          <ProCard title="Token 结果" variant="outlined">
             {(
               [
                 ['refresh_token', tokenResult.refresh_token],
@@ -363,52 +308,31 @@ const TokenToolPage: React.FC = () => {
                 <Typography.Text type="secondary">{key}</Typography.Text>
                 <Input.TextArea
                   rows={key.includes('token') ? 2 : 1}
+                  aria-label={key}
+                  onFocus={(event) => event.target.select()}
                   value={value || ''}
                   readOnly
                 />
+                <Button
+                  size="small"
+                  aria-label={`复制 ${key}`}
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(value || '');
+                      message.success('已复制');
+                    } catch {
+                      message.error('复制失败，请选中 Token 后手动复制');
+                    }
+                  }}
+                >
+                  复制
+                </Button>
               </div>
             ))}
           </ProCard>
         ) : null}
       </Space>
 
-      <Modal
-        title="写入账号"
-        open={saveOpen}
-        onCancel={() => setSaveOpen(false)}
-        onOk={() => void confirmSave()}
-        destroyOnHidden
-      >
-        <Radio.Group
-          value={saveMode}
-          onChange={(e) => setSaveMode(e.target.value)}
-          style={{ marginBottom: 16 }}
-        >
-          <Radio.Button value="update">选择账号更新</Radio.Button>
-          <Radio.Button value="create">按邮箱保存</Radio.Button>
-        </Radio.Group>
-        {saveMode === 'update' ? (
-          <Select
-            style={{ width: '100%' }}
-            placeholder="选择账号"
-            value={accountId}
-            onChange={setAccountId}
-            options={accounts.map((a) => ({
-              label: `${a.email} (${a.status || 'active'})`,
-              value: a.id,
-            }))}
-          />
-        ) : (
-          <>
-            <Input
-              placeholder="邮箱地址"
-              value={newEmail}
-              onChange={(e) => setNewEmail(e.target.value)}
-            />
-            <p>邮箱已存在时更新 Token，不存在时创建账号；保留已有账号的其他信息。</p>
-          </>
-        )}
-      </Modal>
     </PageContainer>
   );
 };

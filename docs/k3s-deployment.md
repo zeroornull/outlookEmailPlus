@@ -80,3 +80,9 @@ kubectl --context default -n dev get deployment outlook-email-plus -o jsonpath="
 | 健康检查 | <https://outlook-email-plus.173114.xyz/healthz>，返回 `status=ok` |
 
 当前 `/healthz` 的 `git_sha` / `build_time` 来自仓库历史 `.build-info`，其中 SHA 仍为旧值 `fc5844`；不要用它判定此次部署版本。脚本仅检查健康状态，版本以 Deployment 中固定的镜像 digest 核对，前端页脚可作辅助核对。
+
+## 每日 Token 刷新
+
+线上已设置 `enable_scheduled_refresh=true`、`use_cron_schedule=false`、`refresh_interval_days=1`。现有任务每天北京时间 02:00 检查刷新，执行时读取数据库中的周期，无需为这项配置重启服务。
+
+刷新成功后保存 Microsoft 轮换返回的新 refresh token；每日刷新无法恢复已撤销或已过期的授权。此类账号需重新登录 Microsoft，在 Token 工具中换取 Token 后自动导入对应邮箱。

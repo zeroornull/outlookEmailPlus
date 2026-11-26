@@ -11,12 +11,12 @@ const GUIDE_TUTORIAL_LINKS = [
 
 const CSRF_TOKEN = document.querySelector('meta[name="csrf-token"]')?.content || '';
 const SCOPE_PRESETS = {
-    graph: ['offline_access', 'https://graph.microsoft.com/.default'],
-    imap: ['offline_access', 'https://outlook.office.com/IMAP.AccessAsUser.All'],
+    graph: ['offline_access', 'openid', 'profile', 'email', 'https://graph.microsoft.com/.default'],
+    imap: ['offline_access', 'openid', 'profile', 'email', 'https://outlook.office.com/IMAP.AccessAsUser.All'],
 };
 const DEFAULT_COMPAT_SCOPE = SCOPE_PRESETS.graph.join(' ');
 
-let scopeTokens = ['offline_access', 'https://graph.microsoft.com/.default'];
+let scopeTokens = [...SCOPE_PRESETS.graph];
 let currentTokenResult = null;
 
 async function tokenToolFetch(url, options = {}) {
@@ -70,27 +70,6 @@ function clearStatus() {
     statusNode.innerHTML = '';
 }
 
-function showSaveDialogStatus(message, type = 'info', detail = '') {
-    const statusNode = document.getElementById('saveDialogStatus');
-    if (!statusNode) {
-        showStatus(message, type, detail);
-        return;
-    }
-    statusNode.className = `token-status token-dialog-status ${type}`;
-    statusNode.innerHTML = `
-        <div class="token-status-title">${escapeHtml(message)}</div>
-        ${detail ? `<div class="token-status-detail">${escapeHtml(detail)}</div>` : ''}
-    `;
-}
-
-function clearSaveDialogStatus() {
-    const statusNode = document.getElementById('saveDialogStatus');
-    if (!statusNode) {
-        return;
-    }
-    statusNode.className = 'token-status token-dialog-status hidden';
-    statusNode.innerHTML = '';
-}
 
 function parseScopeInput(raw) {
     return String(raw || '')
@@ -290,7 +269,13 @@ function fillResultField(id, value) {
 function renderTokenResult(result) {
     currentTokenResult = result || {};
     document.getElementById('result-panel').classList.remove('hidden');
-    document.getElementById('resultSuccessBanner').classList.remove('hidden');
+    const imported = !result.import_error && result.account?.email &&
+        ['created', 'updated'].includes(result.account.action);
+    const banner = document.getElementById('resultImportStatus');
+    banner.className = `token-status ${imported ? 'success' : 'error'}`;
+    banner.textContent = imported
+        ? `${result.account.email}：${result.account.action === 'created' ? t('账号已创建，Token 已导入') : t('账号 Token 已更新')}`
+        : `${t('Token 已获取，但未导入账号')}：${result.import_error?.message || t('服务器未确认账号导入结果')}${result.import_error?.details ? `；${result.import_error.details}` : ''}。${t('请先复制并妥善保管下方 Token，检查服务器配置和账号导入错误后，重新生成授权链接并授权导入。')}`;
 
     fillResultField('refreshTokenResult', result.refresh_token || '');
     fillResultField('accessTokenResult', result.access_token || '');
@@ -303,7 +288,6 @@ function renderTokenResult(result) {
     fillResultField('rolesClaimResult', result.roles_claim || '');
     fillResultField('expiresInResult', String(result.expires_in || ''));
 
-    showStatus(t('Token 已成功换取，可以复制或写入账号'), 'success');
 }
 
 function getCurrentTokenResult() {
@@ -376,107 +360,12 @@ function copyText(text) {
     });
 }
 
-function toggleSaveMode() {
-    const selected = document.querySelector('input[name="saveMode"]:checked')?.value || 'create';
-    document.getElementById('updateModeSection')?.classList.toggle('hidden', selected !== 'update');
-    document.getElementById('createModeSection')?.classList.toggle('hidden', selected !== 'create');
-    clearSaveDialogStatus();
-}
-
-async function loadAccountOptions() {
-    const data = await tokenToolFetch('/api/token-tool/accounts');
-    const select = document.getElementById('accountSelect');
-    if (!select) {
-        return;
-    }
-    if (!data.success) {
-        select.innerHTML = `<option value="">${t('加载账号失败')}</option>`;
-        showSaveDialogStatus(data.error?.message || t('加载账号失败'), 'error');
-        return;
-    }
-
-    const accounts = data.data || [];
-    if (!accounts.length) {
-        select.innerHTML = `<option value="">${t('暂无可更新账号')}</option>`;
-        if (document.querySelector('input[name="saveMode"]:checked')?.value === 'update') {
-            showSaveDialogStatus(t('当前没有可更新账号，可切换到“按邮箱保存”模式'), 'info');
-        }
-        return;
-    }
-    clearSaveDialogStatus();
-    select.innerHTML = accounts.map(account => `
-        <option value="${escapeHtml(String(account.id))}">
-            ${escapeHtml(account.email)} (${escapeHtml(account.status || 'active')})
-        </option>
-    `).join('');
-}
-
-async function openSaveDialog() {
-    if (!getCurrentTokenResult().refresh_token) {
-        showStatus(t('请先成功换取 Token'), 'error');
-        return;
-    }
-    clearSaveDialogStatus();
-    toggleSaveMode();
-    await loadAccountOptions();
-    document.getElementById('save-dialog')?.showModal();
-}
-
-function closeSaveDialog() {
-    clearSaveDialogStatus();
-    document.getElementById('save-dialog')?.close();
-}
-
-async function confirmSaveToAccount() {
-    clearStatus();
-    clearSaveDialogStatus();
-    const mode = document.querySelector('input[name="saveMode"]:checked')?.value || 'create';
-    const resultData = getCurrentTokenResult();
-    const payload = {
-        mode,
-        refresh_token: resultData.refresh_token,
-        client_id: resultData.client_id,
-        scope: resultData.requested_scope || resultData.granted_scope || '',
-    };
-
-    if (mode === 'update') {
-        payload.account_id = document.getElementById('accountSelect')?.value || '';
-        if (!payload.account_id) {
-            showSaveDialogStatus(t('请选择要更新的账号'), 'error');
-            return;
-        }
-    } else {
-        payload.email = document.getElementById('newAccountEmail')?.value.trim() || '';
-        if (!payload.email) {
-            showSaveDialogStatus(t('请输入邮箱地址'), 'error');
-            return;
-        }
-    }
-
-    const data = await tokenToolFetch('/api/token-tool/save', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-    });
-    if (!data.success) {
-        showSaveDialogStatus(data.error?.message || t('写入失败'), 'error', data.error?.details || '');
-        return;
-    }
-
-    closeSaveDialog();
-    const action = data.data?.action;
-    showStatus(action === 'created'
-        ? t('账号已创建，Token 已写入')
-        : action === 'updated'
-            ? t('账号 Token 已更新')
-            : t('Token 已写入账号'), 'success');
-}
 
 document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('scopeChips')?.addEventListener('click', handleScopeChipClick);
     document.getElementById('redirectUri').value = buildDefaultRedirectUri();
     renderScopeChips(SCOPE_PRESETS.graph.join(' '));
     loadOAuthConfig();
-    toggleSaveMode();
     handleTenantChange();
 
     // 指引折叠状态记忆

@@ -195,7 +195,78 @@ def exchange_token() -> Any:
         return build_error_response("OAUTH_MICROSOFT_REQUEST_FAILED", str(error_info), status=400)
 
     log_audit("create", "oauth_token", flow_data["client_id"], "Token 获取成功")
+    if "import_error" not in token_data:
+        email = token_data.get("email")
+        refresh_token = token_data.get("refresh_token")
+        if not email or not refresh_token:
+            token_data["import_error"] = {
+                "message": "Token 已获取，但缺少 Microsoft 邮箱身份或 Refresh Token，未导入账号",
+                "details": "请重新发起授权并允许 openid、profile、email、offline_access 权限。",
+            }
+        else:
+            account, import_error = _upsert_token_account(email, flow_data["client_id"], refresh_token)
+            if import_error:
+                token_data["import_error"] = {
+                    "message": import_error[1],
+                    "details": "请处理账号冲突或数据库错误后重新发起授权；本次获取的 Token 仍可复制。",
+                }
+            else:
+                token_data["account"] = account
     return jsonify({"success": True, "data": token_data})
+
+
+def _upsert_token_account(email: str | None, client_id: str, refresh_token: str, account_id: int | None = None):
+    """写入已验证的 Token，仅修改凭据和状态，保留其余账号元数据。"""
+    db = None
+    try:
+        db = get_db()
+        # 先锁定写事务再匹配邮箱，避免并发导入产生仅大小写不同的重复账号。
+        db.execute("BEGIN IMMEDIATE")
+        if account_id is not None:
+            matches = db.execute("SELECT id, email, account_type, provider FROM accounts WHERE id = ?", (account_id,)).fetchall()
+        else:
+            matches = db.execute(
+                "SELECT id, email, account_type, provider FROM accounts WHERE email = ? COLLATE NOCASE", (email,)
+            ).fetchall()
+        if len(matches) > 1:
+            db.rollback()
+            return None, ("OAUTH_ACCOUNT_CONFLICT", "该邮箱存在多个大小写重复账号，请先合并账号后重新授权", 409)
+        existing = dict(matches[0]) if matches else None
+        if account_id is not None and not existing:
+            db.rollback()
+            return None, ("ACCOUNT_NOT_FOUND", "账号不存在", 404)
+        if existing and (
+            (existing.get("account_type") or "outlook").strip().lower() != "outlook"
+            or (existing.get("provider") or "outlook").strip().lower() != "outlook"
+        ):
+            db.rollback()
+            return None, ("OAUTH_ACCOUNT_CONFLICT", "该邮箱已属于其他类型或服务商的账号，无法覆盖凭据", 409)
+        if existing:
+            account_id = existing["id"]
+            email = existing["email"]
+            db.execute(
+                "UPDATE accounts SET client_id = ?, refresh_token = ?, status = 'active', "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (client_id, encrypt_data(refresh_token), account_id),
+            )
+            action = "updated"
+        else:
+            if not accounts_repo.add_account(
+                email_addr=email, password="", client_id=client_id, refresh_token=refresh_token,
+                account_type="outlook", provider="outlook", db=db, commit=False,
+            ):
+                db.rollback()
+                return None, ("INTERNAL_ERROR", "创建账号失败，请检查数据库后重新授权", 500)
+            account_id = db.execute("SELECT id FROM accounts WHERE email = ?", (email,)).fetchone()["id"]
+            action = "created"
+        db.commit()
+    except Exception:
+        if db is not None:
+            db.rollback()
+        return None, ("INTERNAL_ERROR", "保存账号失败，请检查数据库后重新授权", 500)
+
+    log_audit("update" if action == "updated" else "create", "account", str(account_id), f"Token 工具写入 (client_id={client_id[:8]}...)")
+    return {"account_id": account_id, "email": email, "status": "active", "token_valid": True, "action": action}, None
 
 
 @login_required
@@ -240,95 +311,26 @@ def save_to_account() -> Any:
     if new_rt:
         refresh_token = new_rt
 
-    existing = None
+    email = None
+    account_id = None
     if mode == "create":
         email = (data.get("email") or "").strip()
         if not email or "@" not in email:
             return build_error_response("OAUTH_CONFIG_INVALID", "邮箱格式无效", status=400)
-        # 与账号仓库及 email UNIQUE 约束一致：去除首尾空白，区分大小写。
-        existing = accounts_repo.get_account_by_email(email)
-        if existing and (
-            (existing.get("account_type") or "outlook").strip().lower() != "outlook"
-            or (existing.get("provider") or "outlook").strip().lower() != "outlook"
-        ):
-            return build_error_response(
-                "OAUTH_ACCOUNT_CONFLICT", "该邮箱已属于其他类型或服务商的账号，无法覆盖凭据", status=409
-            )
-
-    if mode == "update" or (mode == "create" and existing):
-        account_id = existing["id"] if existing else data.get("account_id")
-        if not account_id:
+    elif mode == "update":
+        if not data.get("account_id"):
             return build_error_response("OAUTH_CONFIG_INVALID", "account_id 不能为空", status=400)
         try:
-            account_id_int = int(account_id)
+            account_id = int(data["account_id"])
         except (TypeError, ValueError):
             return build_error_response("OAUTH_CONFIG_INVALID", "account_id 格式无效", status=400)
+    else:
+        return build_error_response("OAUTH_CONFIG_INVALID", "mode 必须是 update 或 create", status=400)
 
-        existing = accounts_repo.get_account_by_id(account_id_int)
-        if not existing:
-            return build_error_response("ACCOUNT_NOT_FOUND", "账号不存在", status=404)
-
-        # 单次写入仅替换凭据及状态，保留密码、分组、标签和所有其他元数据。
-        db = get_db()
-        try:
-            db.execute(
-                "UPDATE accounts SET client_id = ?, refresh_token = ?, status = 'active', "
-                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (client_id, encrypt_data(refresh_token), account_id_int),
-            )
-            db.commit()
-        except Exception:
-            db.rollback()
-            return build_error_response("INTERNAL_ERROR", "更新账号失败", status=500)
-
-        log_audit(
-            "update",
-            "account",
-            str(account_id_int),
-            f"Token 工具写入 (client_id={client_id[:8]}...)",
-        )
-        return jsonify(
-            {
-                "success": True,
-                "data": {
-                    "account_id": account_id_int,
-                    "email": existing["email"],
-                    "status": "active",
-                    "token_valid": True,
-                    "action": "updated",
-                },
-            }
-        )
-
-    if mode == "create":
-
-        success = accounts_repo.add_account(
-            email_addr=email,
-            password="",
-            client_id=client_id,
-            refresh_token=refresh_token,
-            account_type="outlook",
-            provider="outlook",
-        )
-        if not success:
-            return build_error_response("INTERNAL_ERROR", "创建账号失败（邮箱可能已存在）", status=400)
-
-        created = accounts_repo.get_account_by_email(email)
-        log_audit("create", "account", email, f"Token 工具新建 (client_id={client_id[:8]}...)")
-        return jsonify(
-            {
-                "success": True,
-                "data": {
-                    "account_id": created["id"] if created else None,
-                    "email": email,
-                    "status": "active",
-                    "token_valid": True,
-                    "action": "created",
-                },
-            }
-        )
-
-    return build_error_response("OAUTH_CONFIG_INVALID", "mode 必须是 update 或 create", status=400)
+    account, save_error = _upsert_token_account(email, client_id, refresh_token, account_id)
+    if save_error:
+        return build_error_response(save_error[0], save_error[1], status=save_error[2])
+    return jsonify({"success": True, "data": account})
 
 
 @login_required

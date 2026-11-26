@@ -14,7 +14,7 @@
         <header class="token-tool-header">
             <div>
                 <h1>🔑 OAuth Token 工具</h1>
-                <p>通过 Microsoft OAuth 获取 Token 并写入账号。支持个人 Microsoft 账号（tenant=consumers、IMAP / Graph），可使用服务器配置的 Web 应用凭据或公共客户端。</p>
+                <p>通过 Microsoft OAuth 获取 Token 并自动导入本次授权的邮箱，无需选择账号。支持个人 Microsoft 账号（tenant=consumers、IMAP / Graph），可使用服务器配置的 Web 应用凭据或公共客户端。</p>
             </div>
             <button type="button" class="btn-inline ghost" onclick="window.close()">关闭</button>
         </header>
@@ -56,6 +56,7 @@
                         <p>进入应用 →「API 权限」→「添加权限」→ 选择「Microsoft Graph」→「委托的权限」，添加以下权限：</p>
                         <ul>
                             <li><code>offline_access</code>（必须，用于获取 refresh_token）</li>
+                            <li><code>openid profile email</code>（识别本次授权的邮箱，用于自动导入）</li>
                             <li><code>Mail.Read</code>（读取邮件）</li>
                             <li><code>User.Read</code>（读取用户信息）</li>
                         </ul>
@@ -147,21 +148,21 @@
         </section>
 
         <details id="manual-exchange" class="token-card token-details">
-            <summary>③ 换取 Token</summary>
+            <summary>③ 换取 Token 并导入</summary>
             <div class="token-details-body">
                 <label class="token-field token-field-full">
                     <span>回调 URL</span>
                     <textarea id="callbackUrl" class="form-input token-textarea" placeholder="粘贴完整回调地址，例如 http://localhost:5000/token-tool/callback?code=...&state=..."></textarea>
                 </label>
                 <div class="token-button-row">
-                    <button type="button" class="btn-inline primary" onclick="exchangeToken()">换取 Token</button>
+                    <button type="button" class="btn-inline primary" onclick="exchangeToken()">换取 Token 并导入</button>
                 </div>
             </div>
         </details>
 
+        <div role="status" aria-live="polite" aria-atomic="true"><div id="resultImportStatus"></div></div>
         <section id="result-panel" class="token-card hidden">
             <div class="token-card-title">④ 结果</div>
-            <div id="resultSuccessBanner" class="token-success-banner hidden">✅ Token 获取成功</div>
             <div class="result-grid">
                 <div class="result-item result-item-full">
                     <label>Refresh Token</label>
@@ -210,46 +211,10 @@
             </div>
             <div class="token-button-row">
                 <button type="button" class="btn-inline" onclick="copyAllResults()">复制全部</button>
-                <button type="button" class="btn-inline primary" onclick="openSaveDialog()">写入到账号</button>
             </div>
         </section>
     </main>
 
-    <dialog id="save-dialog" class="token-dialog">
-        <div class="token-dialog-header">
-            <h2>写入到账号</h2>
-            <button type="button" class="btn-inline ghost" onclick="closeSaveDialog()">关闭</button>
-        </div>
-        <div class="token-dialog-body">
-            <div id="saveDialogStatus" class="token-status token-dialog-status hidden"></div>
-            <label class="dialog-mode">
-                <input type="radio" name="saveMode" value="update" onchange="toggleSaveMode()">
-                <span>选择账号更新</span>
-            </label>
-            <div id="updateModeSection" class="dialog-section hidden">
-                <label class="token-field token-field-full">
-                    <span>选择账号</span>
-                    <select id="accountSelect" class="form-input"></select>
-                </label>
-            </div>
-
-            <label class="dialog-mode">
-                <input type="radio" name="saveMode" value="create" checked onchange="toggleSaveMode()">
-                <span>按邮箱保存</span>
-            </label>
-            <div id="createModeSection" class="dialog-section">
-                <label class="token-field token-field-full">
-                    <span>邮箱地址</span>
-                    <input id="newAccountEmail" type="email" class="form-input" placeholder="user@outlook.com">
-                </label>
-                <p>邮箱已存在时更新 Token，不存在时创建账号；保留已有账号的其他信息。</p>
-            </div>
-        </div>
-        <div class="token-dialog-footer">
-            <button type="button" class="btn-inline" onclick="closeSaveDialog()">取消</button>
-            <button type="button" class="btn-inline primary" onclick="confirmSaveToAccount()">确认写入</button>
-        </div>
-    </dialog>
 
     <script src="{{ url_for('static', filename='js/i18n.js') }}?v={{ APP_VERSION }}"></script>
     <script src="{{ url_for('static', filename='js/features/token_tool.js') }}?v={{ APP_VERSION }}"></script>

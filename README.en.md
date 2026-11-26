@@ -79,7 +79,7 @@ The `browser-extension/` directory contains a Chrome/Edge Manifest V3 extension.
 - Recommended minimum Graph delegated permissions: **offline_access + Mail.Read + User.Read**; add **Office 365 Exchange Online → IMAP.AccessAsUser.All** only when IMAP is required
 - Supports Graph / IMAP scope presets, error guidance, and JWT audience/scope diagnostics; the frontend now recommends the **Graph mail preset** by default (backend env fallback remains IMAP-compatible)
 - Built-in Azure quick-start guide card (5 steps) and tutorial link: <https://real-caption-6d1.notion.site/OutlooKMailplus-token-344463aed7e680099380dc324ecdf1c9?source=copy_link>
-- Supports writing refresh tokens into existing Outlook accounts or creating new accounts after validation, while rejecting incompatible configurations
+- After exchanging the authorization code, the tool identifies the authorized mailbox from Microsoft's identity response and imports it automatically. Existing Outlook accounts receive updated credentials and become active; missing accounts are created. Passwords, groups, tags, and remarks are preserved, with no account picker. Authorization automatically requests `openid profile email`; identity or database failures retain the acquired tokens and clearly report that import failed.
 
 ### v1.13.0 — One-Click Update
 

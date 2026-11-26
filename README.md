@@ -83,7 +83,7 @@ OutlookMail Plus 是一款面向个人与团队的注册邮箱管理器。
 - Graph 场景建议最小权限：**offline_access + Mail.Read + User.Read**；如需 IMAP 再额外补 **Office 365 Exchange Online → IMAP.AccessAsUser.All**
 - 支持 Graph / IMAP Scope 预设、错误引导、JWT audience/scope 诊断；前端默认推荐 **Graph 邮件预设**（后端环境变量 fallback 保持 IMAP 兼容 Scope）
 - 页面内置 Azure 应用注册快速指引折叠卡片（5 步）与教程入口：<https://real-caption-6d1.notion.site/OutlooKMailplus-token-344463aed7e680099380dc324ecdf1c9?source=copy_link>
-- 支持一键写入已有 Outlook 账号或创建新账号，写入前自动验证 refresh token，并拒绝不兼容配置
+- 换取 Token 成功后，工具从 Microsoft 返回的身份信息识别授权邮箱并自动导入：邮箱已存在则更新凭据并恢复启用，不存在则创建 Outlook 账号；保留已有账号的密码、分组、标签和备注，无需选择账号。授权请求自动补充 `openid profile email`；无法识别邮箱或写入失败时保留 Token 并明确显示导入失败。
 
 ### v1.13.0 — 一键更新
 

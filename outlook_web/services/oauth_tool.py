@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+import re
 import secrets
 import time
 from threading import Lock
@@ -93,6 +94,8 @@ def start_oauth_flow(oauth_config: Dict[str, Any]) -> Tuple[Optional[str], str]:
     normalized_scope, scope_error = validate_scope(oauth_config.get("scope", ""))
     if scope_error:
         return None, scope_error
+    # 自动导入需要 Microsoft 同一授权响应中的邮箱身份，保留通用 scope 规范化契约。
+    normalized_scope = " ".join(sorted(set(normalized_scope.split()) | {"openid", "profile", "email"}))
 
     verifier, challenge = generate_pkce()
     state = secrets.token_urlsafe(24)
@@ -170,6 +173,29 @@ def exchange_code_for_tokens(code: str, oauth_config: Dict[str, Any], verifier: 
 
     tokens = resp.json()
     result = _extract_token_data(tokens, oauth_config)
+    # 只读取本次后端通过 HTTPS 直接取得的 id_token，不接受浏览器提供的身份。
+    identity = decode_jwt_payload(tokens.get("id_token", ""))
+    if not isinstance(identity, dict) or identity.get("aud") != oauth_config["client_id"]:
+        result["import_error"] = {
+            "message": "Token 已获取，但 Microsoft 未返回匹配此应用的邮箱身份，未导入账号",
+            "details": "请重新发起授权并允许 openid、profile、email 权限；确认使用同一 Client ID。",
+        }
+    else:
+        for claim in ("email", "preferred_username", "upn"):
+            value = identity.get(claim)
+            if isinstance(value, str) and re.fullmatch(r"[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+", value.strip()):
+                result["email"] = value.strip()
+                break
+        if not result.get("email"):
+            result["import_error"] = {
+                "message": "Token 已获取，但 Microsoft 未提供可用的邮箱地址，未导入账号",
+                "details": "请重新发起授权并允许 email 权限，使用具有有效邮箱地址的 Microsoft 账号。",
+            }
+    if not result["refresh_token"]:
+        result["import_error"] = {
+            "message": "Token 已获取，但未返回 Refresh Token，未导入账号",
+            "details": "请重新发起授权并允许 offline_access 权限，必要时勾选强制同意。",
+        }
     logger.info("[oauth_tool] Token 换取成功 (client_id=%s...)", oauth_config["client_id"][:8])
     return result, None
 
@@ -258,10 +284,11 @@ def map_error_guidance(error_detail: str) -> str:
 
 
 def decode_jwt_payload(token: str) -> Optional[dict]:
-    """不验签解码 JWT payload（纯展示用途）
+    """仅解码 JWT payload，不验证签名。
 
-    从 access_token 中提取 audience / scp / roles 等诊断信息,
-    帮助用户确认实际授权范围。不需要签名验证,因为仅用于页面展示。
+    access_token 的声明仅用于诊断展示。身份只允许来自后端直接取得的
+    Microsoft HTTPS token 响应，且调用方必须另行校验 id_token 的 audience。
+    此函数不能用于验证浏览器提交的 token。
     """
     import json as json_mod
 
@@ -306,7 +333,7 @@ def _extract_token_data(tokens: dict, oauth_config: dict) -> dict:
 
     if access_token:
         jwt_payload = decode_jwt_payload(access_token)
-        if jwt_payload:
+        if isinstance(jwt_payload, dict):
             result["audience"] = jwt_payload.get("aud", "")
             result["scope_claim"] = jwt_payload.get("scp", "")
             result["roles_claim"] = " ".join(jwt_payload.get("roles", []))

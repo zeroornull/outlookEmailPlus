@@ -12,6 +12,15 @@ export type TokenToolConfig = {
 };
 
 export type TokenResult = {
+  email?: string;
+  account?: {
+    account_id: number | null;
+    email: string;
+    status: string;
+    token_valid: boolean;
+    action: 'created' | 'updated';
+  };
+  import_error?: { message: string; details?: string };
   refresh_token?: string;
   access_token?: string;
   client_id?: string;
@@ -62,35 +71,6 @@ export async function exchangeToken(callbackUrl: string) {
   );
 }
 
-export async function fetchTokenToolAccounts() {
-  return outlookRequest<{
-    success: boolean;
-    data?: Array<{ id: number; email: string; status?: string }>;
-    error?: any;
-  }>('/api/token-tool/accounts', {
-    method: 'GET',
-    skipErrorHandler: true,
-  });
-}
-
-export async function saveTokenToAccount(body: {
-  mode: 'update' | 'create' | string;
-  refresh_token: string;
-  client_id?: string;
-  scope?: string;
-  account_id?: number | string;
-  email?: string;
-}) {
-  return outlookRequest<{
-    success: boolean;
-    data?: { action: 'created' | 'updated' };
-    message?: string;
-    error?: unknown;
-  }>(
-    '/api/token-tool/save',
-    { method: 'POST', data: body, skipErrorHandler: true },
-  );
-}
 
 export function pickTokenToolError(payload: any, fallback = '请求失败'): string {
   if (!payload) return fallback;
