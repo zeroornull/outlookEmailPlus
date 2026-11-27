@@ -39,7 +39,8 @@ from outlook_web.security.crypto import (
 # v23：2026-04-19 数据概览大盘（verification_extract_logs + overview 兼容字段）
 # v24：2026-07-01 临时邮箱接入邮箱池（temp_emails 新增池生命周期字段：pool_status/claimed_by/...，可被 claim-random 领取）
 # v25：ZER-537 — external_api_keys 新增 expires_at，支持 API Key 生命周期管理
-DB_SCHEMA_VERSION = 25
+# v26：Telegram 单封邮件限时加密预览快照
+DB_SCHEMA_VERSION = 26
 DB_SCHEMA_VERSION_KEY = "db_schema_version"
 DB_SCHEMA_LAST_UPGRADE_TRACE_ID_KEY = "db_schema_last_upgrade_trace_id"
 DB_SCHEMA_LAST_UPGRADE_ERROR_KEY = "db_schema_last_upgrade_error"
@@ -795,6 +796,18 @@ def init_db(database_path: Optional[str] = None):
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_account_tags_tag_id
             ON account_tags(tag_id)
+            """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS telegram_preview_snapshots (
+                id TEXT PRIMARY KEY,
+                encrypted_payload TEXT NOT NULL,
+                expires_at REAL NOT NULL
+            )
+            """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_telegram_preview_expires_at
+            ON telegram_preview_snapshots(expires_at)
             """)
 
         # v5: Telegram 推送去重日志（BUG-00011 P2）

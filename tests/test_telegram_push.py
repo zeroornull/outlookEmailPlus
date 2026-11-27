@@ -70,7 +70,7 @@ def _insert_test_account(db, email, provider="imap", enabled=0, last_checked=Non
 class TestBuildTelegramMessage(unittest.TestCase):
     """TDD-00007 T-01 ~ T-05"""
 
-    def _build(self, account_email, **email_kwargs):
+    def _build(self, account_email="user@example.com", **email_kwargs):
         from outlook_web.services.telegram_push import _build_telegram_message
 
         email = {
@@ -78,59 +78,149 @@ class TestBuildTelegramMessage(unittest.TestCase):
             "sender": email_kwargs.get("sender", "sender@test.com"),
             "received_at": email_kwargs.get("received_at", "2026-03-04T14:30:00"),
             "preview": email_kwargs.get("preview", ""),
+            "content": email_kwargs.get("content", ""),
         }
         return _build_telegram_message(account_email, email)
 
-    def test_t01_normal_email_with_preview(self):
-        """T-01：正常邮件（含预览），消息包含所有关键字段"""
+    def test_t01_contains_required_fields(self):
+        """T-01：主题作标题，发件人、收件人、时间和正文分行。"""
         msg = self._build(
-            "user@example.com",
             subject="Hello World",
-            sender="bob@x.com",
-            received_at="2026-03-04T14:30:00",
+            sender="Bob <bob@x.com>",
             preview="This is a test email body.",
         )
-        self.assertIn("📬", msg)
+        self.assertIn("<b>Hello World</b>", msg)
         self.assertIn("user@example.com", msg)
         self.assertIn("bob@x.com", msg)
-        self.assertIn("Hello World", msg)
-        self.assertIn("14:30", msg)
+        self.assertIn("2026-03-04 14:30:00", msg)
         self.assertIn("This is a test email body.", msg)
-        self.assertIn("内容预览：", msg)
+        self.assertNotIn("内容预览：", msg)
+        self.assertNotIn("T14:30", msg)
 
-    def test_t02_empty_preview_omits_section(self):
-        """T-02：正文为空时，消息中不包含"内容预览："区块"""
-        msg = self._build("user@example.com", preview="")
+    def test_t02_empty_preview(self):
+        """T-02：正文为空时，不追加正文段。"""
+        msg = self._build(preview="")
+        self.assertIn("<b>Test Subject</b>", msg)
         self.assertNotIn("内容预览：", msg)
 
-    def test_t03_very_long_message_truncated(self):
-        """T-03：消息超 4096 字符时截断至 4096，末尾为"..." """
-        msg = self._build("user@example.com", preview="a" * 5000)
+    def test_t03_truncation_at_4096(self):
+        """T-03：超长消息截断到 4096 字符以内，末尾含 '...'。"""
+        msg = self._build(preview="a" * 5000)
         self.assertLessEqual(len(msg), 4096)
-        self.assertTrue(msg.endswith("..."), f"Expected truncation marker, got: {msg[-10:]!r}")
+        self.assertTrue(msg.endswith("..."))
 
     def test_t04_html_special_chars_escaped(self):
         """T-04：subject 和 sender 中的 HTML 特殊字符被正确转义"""
         msg = self._build(
-            "user@example.com",
             subject="<Sale> & <Offer>",
             sender="a&b@test.com",
+            preview="e>f",
         )
-        # 转义后的形式
         self.assertIn("&lt;Sale&gt;", msg)
         self.assertIn("&amp;", msg)
         self.assertIn("a&amp;b@test.com", msg)
-        # 不应出现原始字符（在 subject/sender 渲染位置）
-        # （注意：HTML 标签本身如 <code> 是合法的，只检查 subject/sender 值）
+        self.assertIn("e&gt;f", msg)
         self.assertNotIn("<Sale>", msg)
         self.assertNotIn("<Offer>", msg)
 
-    def test_t05_preview_truncated_at_200_chars(self):
-        """T-05：正文超 200 字时截断，追加"..." """
-        msg = self._build("user@example.com", preview="x" * 300)
-        # 正文区域包含 200 个 x + "..."
-        self.assertIn("x" * 200 + "...", msg)
-        self.assertNotIn("x" * 201, msg)
+    def test_t05_body_keeps_short_text_and_caps_long_text(self):
+        """T-05：短正文完整保留，超长正文按 Telegram 文本上限截断。"""
+        msg = self._build(preview="x" * 300)
+        self.assertIn("x" * 300, msg)
+        long_msg = self._build(content="y" * 5000)
+        self.assertLessEqual(len(long_msg), 4096)
+        self.assertIn("...", long_msg)
+        self.assertNotIn("y" * 3500, long_msg)
+
+    def test_verification_code_is_copyable(self):
+        """验证码单独成行，并带 Telegram 复制按钮。"""
+        from outlook_web.services.telegram_push import _telegram_reply_markup
+
+        email = {
+            "subject": "Your verification code",
+            "sender": "Bob <bob@x.com>",
+            "received_at": "2026-03-04T14:30:00",
+            "preview": "code is 839201",
+        }
+        msg = self._build(**email)
+        with patch("outlook_web.services.telegram_preview.create_telegram_preview_url", return_value=None):
+            markup = _telegram_reply_markup("user@example.com", email, "123")
+        self.assertIn("<code>839201</code>", msg)
+        self.assertEqual(markup["inline_keyboard"][0][0]["copy_text"]["text"], "839201")
+
+
+class TestTelegramPreviewDelivery(unittest.TestCase):
+    def test_preview_button_and_code_have_separate_rows(self):
+        from outlook_web.services.telegram_push import _telegram_reply_markup
+
+        email = {"subject": "Verification code", "content": "Your verification code is 839201"}
+        url = "https://mail.example.com/telegram/preview/signed"
+        with patch("outlook_web.services.telegram_preview.create_telegram_preview_url", return_value=url) as create:
+            for chat_id, target in (("123", "web_app"), ("-100123", "url"), ("@channel", "url")):
+                with self.subTest(chat_id=chat_id):
+                    rows = _telegram_reply_markup("a@example.com", email, chat_id)["inline_keyboard"]
+                    self.assertEqual(rows[0][0], {"text": "查看邮件", target: {"url": url} if target == "web_app" else url})
+                    self.assertEqual(rows[1][0]["copy_text"]["text"], "839201")
+            create.assert_called_with("a@example.com", email)
+
+    def test_without_preview_or_code_has_no_buttons(self):
+        from outlook_web.services.telegram_push import _telegram_reply_markup
+
+        with patch("outlook_web.services.telegram_preview.create_telegram_preview_url", return_value=None):
+            self.assertIsNone(_telegram_reply_markup("a@example.com", {"content": "Hello"}, "123"))
+
+    def test_rejected_buttons_retry_and_report_actual_result(self):
+        from unittest.mock import Mock
+        from outlook_web.services.telegram_push import _send_telegram_message
+
+        for button in ({"text": "查看邮件", "web_app": {"url": "https://mail.example.com"}},
+                       {"text": "复制验证码", "copy_text": {"text": "839201"}}):
+            for retry_ok in (True, False):
+                with self.subTest(button=button, retry_ok=retry_ok), patch(
+                    "outlook_web.repositories.settings.get_telegram_proxy_url", return_value=""
+                ), patch("outlook_web.services.telegram_push.requests.post") as post:
+                    post.side_effect = [Mock(ok=False, status_code=400, text="unsupported button"),
+                                        Mock(ok=retry_ok, status_code=200 if retry_ok else 500, text="retry")]
+                    self.assertEqual(_send_telegram_message("token", "123", "body", {"inline_keyboard": [[button]]}), retry_ok)
+                    self.assertEqual(post.call_count, 2)
+                    self.assertNotIn("reply_markup", post.call_args.kwargs["json"])
+
+    def test_imap_preserves_html_after_plain_and_ignores_attachments(self):
+        from email.message import EmailMessage
+        from unittest.mock import Mock
+        from outlook_web.services.telegram_push import _fetch_new_emails_imap
+
+        message = EmailMessage()
+        message["Subject"] = "Hello"
+        message["Date"] = "Thu, 05 Mar 2026 10:00:00 +0000"
+        message.set_content("Plain body")
+        message.add_alternative("<p>Original <b>HTML</b></p>", subtype="html")
+        message.add_attachment(b"<p>Attachment</p>", maintype="text", subtype="html", filename="attached.html")
+        conn = Mock()
+        conn.select.return_value = ("OK", [])
+        conn.search.return_value = ("OK", [b"1"])
+        conn.fetch.side_effect = [("OK", [(b'1 INTERNALDATE "05-Mar-2026 10:00:00 +0000"', b"")]),
+                                  ("OK", [(b"1", message.as_bytes())])]
+        with patch("imaplib.IMAP4_SSL", return_value=conn):
+            emails = _fetch_new_emails_imap({"email": "a@example.com", "imap_host": "imap.example.com"}, "2026-03-01T00:00:00")
+        self.assertEqual(len(emails), 1)
+        self.assertEqual(emails[0]["content"].strip(), "Plain body")
+        self.assertEqual(emails[0]["html_content"].strip(), "<p>Original <b>HTML</b></p>")
+        self.assertEqual(conn.fetch.call_count, 2)
+
+    def test_graph_preserves_original_html_without_another_request(self):
+        from unittest.mock import Mock
+        from outlook_web.services.telegram_push import _fetch_new_emails_graph
+
+        response = Mock(ok=True)
+        response.json.return_value = {"value": [{"id": "one", "body": {"contentType": "html", "content": "<p>Original HTML</p>"}}]}
+        with patch("outlook_web.services.graph.get_access_token_graph", return_value="access"), patch(
+            "outlook_web.services.telegram_push.requests.get", return_value=response
+        ) as get:
+            emails = _fetch_new_emails_graph({}, "2026-03-01T00:00:00")
+        self.assertEqual(emails[0]["html_content"], "<p>Original HTML</p>")
+        self.assertEqual(emails[0]["content"], "Original HTML")
+        get.assert_called_once()
 
 
 # ===========================================================================
@@ -538,7 +628,7 @@ class TestRunTelegramPushJob(unittest.TestCase):
                     return emails_a
                 return emails_b
 
-            def fake_send(token, chat, msg):
+            def fake_send(token, chat, msg, reply_markup=None):
                 nonlocal call_count
                 call_count += 1
                 return True
@@ -1157,7 +1247,7 @@ class TestParallelJobBehavior(unittest.TestCase):
 
             send_calls = []
 
-            def fake_send(token, chat, msg):
+            def fake_send(token, chat, msg, reply_markup=None):
                 send_calls.append(msg)
                 return False  # 发送失败
 
@@ -1257,7 +1347,7 @@ class TestParallelJobBehavior(unittest.TestCase):
 
             send_calls = []
 
-            def fake_send(token, chat, msg):
+            def fake_send(token, chat, msg, reply_markup=None):
                 send_calls.append(msg)
                 return True
 
@@ -1285,7 +1375,7 @@ class TestParallelJobBehavior(unittest.TestCase):
 
             send_calls = []
 
-            def fake_send(token, chat, msg):
+            def fake_send(token, chat, msg, reply_markup=None):
                 send_calls.append(msg)
                 return True
 

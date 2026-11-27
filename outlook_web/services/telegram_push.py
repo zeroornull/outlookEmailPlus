@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 MAX_TELEGRAM_LENGTH = 4096
+TELEGRAM_TEXT_LIMIT = 3500
 MAX_PREVIEW_LENGTH = 200
 MAX_EMAILS_PER_FETCH = 50
 MAX_SENT_PER_JOB = 20
@@ -57,65 +58,132 @@ def _html_to_plain(html_str: str) -> str:
     return text
 
 
+def _format_telegram_body(text: str) -> str:
+    """保留换行，去掉零宽字符和行内多余空白。"""
+    if not text:
+        return ""
+    lines = []
+    for line in str(text).splitlines():
+        line = re.sub(r"[\u200b-\u200f\ufeff\u034f\u00a0\u3000\u00ad]", "", line)
+        line = re.sub(r"[ \t]+", " ", line).strip()
+        lines.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
+def _format_sender_line(sender: str) -> str:
+    raw = (sender or "").strip()
+    if not raw:
+        return ""
+    from email.utils import parseaddr
+
+    name, address = parseaddr(raw)
+    name = (name or "").strip().strip('"')
+    address = (address or "").strip()
+    if name and address and name.casefold() != address.casefold():
+        return f"{_escape_html(name)}  &lt;{_escape_html(address)}&gt;"
+    return _escape_html(address or name or raw)
+
+
+def _format_received_at(value: str) -> str:
+    text = (value or "").strip()
+    if len(text) >= 19 and text[10] == "T":
+        return text[:10] + " " + text[11:]
+    return text
+
+
+def _verification_code(email: dict) -> str:
+    from outlook_web.services.verification_code_extraction import smart_extract_verification_code
+
+    source = "\n".join(
+        part
+        for part in (
+            str(email.get("subject") or ""),
+            str(email.get("content") or ""),
+            str(email.get("preview") or ""),
+        )
+        if part
+    )
+    return smart_extract_verification_code(source) or ""
+
+
 def _build_telegram_message(account_email: str, email: dict) -> str:
-    """构造 Telegram HTML 消息文本（PRD §3.4 格式）。"""
-    subject = _escape_html(email.get("subject", ""))
-    sender = _escape_html(email.get("sender", ""))
-    received_at = email.get("received_at", "")
-    preview = email.get("preview", "")
+    """按 cloud-mail 的结构构造 Telegram HTML：主题作标题，正文独立成段。"""
+    subject = _escape_html((email.get("subject") or "").strip() or "无主题")
+    sender_line = _format_sender_line(str(email.get("sender") or ""))
+    recipient = _escape_html(account_email or "")
+    received_at = _escape_html(_format_received_at(str(email.get("received_at") or "")))
+    code = _verification_code(email)
+    body = _format_telegram_body(email.get("content") or email.get("preview") or "")
+    if len(body) > TELEGRAM_TEXT_LIMIT:
+        body = body[: TELEGRAM_TEXT_LIMIT - 3].rstrip() + "..."
 
-    lines = [
-        "📬 新邮件通知",
-        "",
-        f"账户：{_escape_html(account_email)}",
-        f"发件人：{sender}",
-        f"主题：{subject}",
-        f"时间：{received_at}",
-    ]
-
-    if preview:
-        truncated = preview[:MAX_PREVIEW_LENGTH]
-        if len(preview) > MAX_PREVIEW_LENGTH:
-            truncated += "..."
-        lines.append("")
-        lines.append(f"内容预览：\n{_escape_html(truncated)}")
+    lines = [f"<b>{subject}</b>", ""]
+    if sender_line:
+        lines.append(f"发件人\u200b：{sender_line}")
+    if recipient:
+        lines.append(f"收件人\u200b：{recipient}")
+    if received_at:
+        lines.append(f"时间\u200b：{received_at}")
+    if body:
+        lines.extend(["", _escape_html(body)])
+    if code:
+        lines.extend(["", f"验证码：<code>{_escape_html(code)}</code>"])
 
     msg = "\n".join(lines)
-
     if len(msg) > MAX_TELEGRAM_LENGTH:
         msg = msg[: MAX_TELEGRAM_LENGTH - 3] + "..."
-
     return msg
 
 
-# ---------------------------------------------------------------------------
-# Telegram API
-# ---------------------------------------------------------------------------
+def _telegram_reply_markup(account_email: str, email: dict, chat_id: str) -> dict | None:
+    """首行查看单封邮件，验证码另行复制；群聊使用普通链接。"""
+    from outlook_web.services.telegram_preview import create_telegram_preview_url
+
+    rows = []
+    preview_url = create_telegram_preview_url(account_email, email)
+    if preview_url:
+        target = "web_app" if str(chat_id).strip().isdigit() else "url"
+        button = {"text": "查看邮件", target: {"url": preview_url} if target == "web_app" else preview_url}
+        rows.append([button])
+    code = _verification_code(email)
+    if code:
+        rows.append([{"text": f"复制验证码 {code}", "copy_text": {"text": code}}])
+    return {"inline_keyboard": rows} if rows else None
 
 
-def _send_telegram_message(bot_token: str, chat_id: str, text: str) -> bool:
+def _send_telegram_message(
+    bot_token: str,
+    chat_id: str,
+    text: str,
+    reply_markup: dict | None = None,
+) -> bool:
     """调用 Telegram sendMessage API。超时 10 秒，失败返回 False。
     自动读取系统 telegram_proxy_url 设置并透传给 requests。
+    查看或复制按钮被接口拒绝时，去掉按钮再发一次正文。
     """
     from outlook_web.repositories import settings as settings_repo
     from outlook_web.services.graph import build_proxies
 
     proxy_url = settings_repo.get_telegram_proxy_url()
     proxies = build_proxies(proxy_url) if proxy_url else None
-
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+
+    def post(markup: dict | None):
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        if markup:
+            payload["reply_markup"] = markup
+        return requests.post(url, json=payload, timeout=10, proxies=proxies)
+
     try:
-        resp = requests.post(
-            url,
-            json={
-                "chat_id": chat_id,
-                "text": text,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True,
-            },
-            timeout=10,
-            proxies=proxies,
-        )
+        resp = post(reply_markup)
+        if not resp.ok and reply_markup and resp.status_code == 400:
+            logger.warning("[telegram_push] inline buttons rejected, retrying without them")
+            resp = post(None)
         if not resp.ok:
             logger.warning("[telegram_push] send HTTP %s: %s", resp.status_code, resp.text[:200])
         return resp.ok
@@ -307,35 +375,23 @@ def _fetch_new_emails_imap(account: dict, since: str, folder: str = "inbox") -> 
                     continue
 
                 body = ""
-                if msg.is_multipart():
-                    for part in msg.walk():
-                        ct = part.get_content_type()
-                        if ct == "text/plain":
-                            payload = part.get_payload(decode=True)
-                            if payload:
-                                body = payload.decode(
-                                    part.get_content_charset() or "utf-8",
-                                    errors="replace",
-                                )
-                            break
-                        elif ct == "text/html" and not body:
-                            payload = part.get_payload(decode=True)
-                            if payload:
-                                body = _html_to_plain(
-                                    payload.decode(
-                                        part.get_content_charset() or "utf-8",
-                                        errors="replace",
-                                    )
-                                )
-                else:
-                    payload = msg.get_payload(decode=True)
-                    if payload:
-                        charset = msg.get_content_charset() or "utf-8"
-                        raw_body = payload.decode(charset, errors="replace")
-                        if msg.get_content_type() == "text/html":
-                            body = _html_to_plain(raw_body)
-                        else:
-                            body = raw_body
+                html_content = ""
+                for part in msg.walk():
+                    if part.get_content_disposition() == "attachment" or part.get_filename():
+                        continue
+                    ct = part.get_content_type()
+                    if ct not in {"text/plain", "text/html"}:
+                        continue
+                    payload = part.get_payload(decode=True)
+                    if not payload:
+                        continue
+                    decoded = payload.decode(part.get_content_charset() or "utf-8", errors="replace")
+                    if ct == "text/plain" and not body:
+                        body = decoded
+                    elif ct == "text/html" and not html_content:
+                        html_content = decoded
+                if not body and html_content:
+                    body = _html_to_plain(html_content)
 
                 preview = body[:MAX_PREVIEW_LENGTH] if body else ""
 
@@ -347,6 +403,7 @@ def _fetch_new_emails_imap(account: dict, since: str, folder: str = "inbox") -> 
                         "received_at": received_iso,
                         "preview": preview,
                         "content": body,
+                        "html_content": html_content,
                         "folder": folder,
                     }
                 )
@@ -399,15 +456,22 @@ def _fetch_new_emails_graph(account: dict, since: str, folder: str = "inbox") ->
             return []
         data = resp.json()
         for item in data.get("value", []):
-            sender_info = item.get("from", {}).get("emailAddress", {})
-            sender = sender_info.get("address", sender_info.get("name", ""))
+            sender_info = (item.get("from") or {}).get("emailAddress") or {}
+            sender_name = (sender_info.get("name") or "").strip()
+            sender_address = (sender_info.get("address") or "").strip()
+            if sender_name and sender_address and sender_name.casefold() != sender_address.casefold():
+                sender = f"{sender_name} <{sender_address}>"
+            else:
+                sender = sender_address or sender_name
             received_raw = item.get("receivedDateTime", "")
             received_iso = received_raw.replace("Z", "").split(".")[0] if received_raw else ""
             preview = (item.get("bodyPreview", "") or "")[:MAX_PREVIEW_LENGTH]
             body = ""
             body_info = item.get("body") or {}
-            if body_info.get("contentType") == "html":
-                body = _html_to_plain(body_info.get("content", "") or "")
+            html_content = ""
+            if str(body_info.get("contentType") or "").lower() == "html":
+                html_content = body_info.get("content", "") or ""
+                body = _html_to_plain(html_content)
             else:
                 body = body_info.get("content", "") or ""
             # BUG-00011 P2: 提取 Message-ID（优先 internetMessageId，回退 Graph id）
@@ -420,6 +484,7 @@ def _fetch_new_emails_graph(account: dict, since: str, folder: str = "inbox") ->
                     "received_at": received_iso,
                     "preview": preview,
                     "content": body,
+                    "html_content": html_content,
                     "folder": folder_name,
                 }
             )
@@ -690,7 +755,9 @@ def run_telegram_push_job(app) -> None:
                     continue
 
                 msg = _build_telegram_message(account["email"], em)
-                if _send_telegram_message(bot_token, chat_id, msg):
+                if _send_telegram_message(
+                    bot_token, chat_id, msg, reply_markup=_telegram_reply_markup(account["email"], em, chat_id)
+                ):
                     sent_count += 1
                     _record_sent_message(
                         {

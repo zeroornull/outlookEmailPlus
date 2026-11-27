@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>{{ email.subject or '无主题' if email else '邮件链接已失效' }} · 邮件预览</title>
+    <style>
+        :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+        body { margin: 0; line-height: 1.6; }
+        main { max-inline-size: 64rem; margin-inline: auto; padding: 1rem; overflow-wrap: anywhere; }
+        h1 { font-size: 1.5rem; margin-block: 0 1rem; }
+        dl { margin-block: 0 2rem; }
+        dt { font-weight: 600; margin-block-start: .75rem; }
+        dd { margin-inline-start: 0; white-space: pre-wrap; }
+        iframe { display: block; inline-size: 100%; min-block-size: 65dvh; border: 0; background: white; color-scheme: light; }
+        pre { font-family: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
+    </style>
+</head>
+<body>
+<main>
+{% if email %}
+    <h1>{{ email.subject or '无主题' }}</h1>
+    <dl>
+        <dt>发件人</dt><dd>{{ email.sender or '未知发件人' }}</dd>
+        <dt>收件人</dt><dd>{{ email.recipient }}</dd>
+        <dt>时间</dt><dd>{{ email.received_at or '未知时间' }}</dd>
+    </dl>
+    <section aria-label="邮件正文">
+    {% if email.html_content %}
+        <iframe title="邮件正文" sandbox="" referrerpolicy="no-referrer" srcdoc="{{ '<meta http-equiv="Content-Security-Policy" content="default-src &#39;none&#39;; style-src &#39;unsafe-inline&#39;; img-src https: data:; frame-src &#39;none&#39;; base-uri &#39;none&#39;; form-action &#39;none&#39;">' }}{{ email.html_content }}"></iframe>
+    {% else %}
+        <pre>{{ email.content }}</pre>
+    {% endif %}
+    </section>
+{% else %}
+    <h1>邮件链接已失效</h1>
+    <p>此链接无效或已超过 7 天有效期，请从新的邮件通知中打开预览。</p>
+{% endif %}
+</main>
+</body>
+</html>

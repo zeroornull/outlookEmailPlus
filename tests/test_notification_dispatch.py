@@ -9,6 +9,29 @@ from outlook_web.security.crypto import encrypt_data
 from tests._import_app import clear_login_attempts, import_web_app_module
 
 
+class TelegramPreviewDispatchTests(unittest.TestCase):
+    def test_business_dispatch_passes_recipient_and_chat_to_markup(self):
+        from outlook_web.services.notification_dispatch import send_business_telegram_notification
+
+        source = {"account": {"email": "recipient@example.com"}}
+        message = {"subject": "Hello", "content": "Body", "html_content": "<p>Body</p>"}
+        markup = {"inline_keyboard": [[{"text": "查看邮件", "url": "https://mail.example.com/preview"}]]}
+        with patch("outlook_web.services.telegram_push._telegram_reply_markup", return_value=markup) as build, patch(
+            "outlook_web.services.telegram_push._send_telegram_message", return_value=True
+        ) as send:
+            send_business_telegram_notification(source, message, bot_token="token", chat_id="-123")
+        build.assert_called_once_with("recipient@example.com", message, "-123")
+        self.assertEqual(send.call_args.kwargs["reply_markup"], markup)
+
+    def test_failed_telegram_send_raises_dispatch_error(self):
+        from outlook_web.services.notification_dispatch import NotificationDispatchError, send_business_telegram_notification
+
+        with patch("outlook_web.services.telegram_push._telegram_reply_markup", return_value=None), patch(
+            "outlook_web.services.telegram_push._send_telegram_message", return_value=False
+        ), self.assertRaises(NotificationDispatchError):
+            send_business_telegram_notification({"label": "recipient@example.com"}, {}, bot_token="token", chat_id="123")
+
+
 class NotificationDispatchTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

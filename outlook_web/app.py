@@ -176,6 +176,9 @@ def create_app(*, autostart_scheduler: Optional[bool] = None):
 
         # Blueprint 路由注册（URL 不变）
         app.register_blueprint(pages.create_blueprint(csrf_exempt=csrf_exempt))
+        from outlook_web.routes import telegram_preview
+
+        app.register_blueprint(telegram_preview.create_blueprint())
         app.register_blueprint(groups.create_blueprint())
         app.register_blueprint(tags.create_blueprint())
         app.register_blueprint(accounts.create_blueprint())

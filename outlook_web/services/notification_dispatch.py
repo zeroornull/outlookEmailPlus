@@ -294,11 +294,13 @@ def send_business_telegram_notification(
     from outlook_web.services.telegram_push import (
         _build_telegram_message,
         _send_telegram_message,
+        _telegram_reply_markup,
     )
 
     account_email = source.get("account", {}).get("email", source.get("label", ""))
     payload = _build_telegram_message(account_email, message)
-    if not _send_telegram_message(bot_token, chat_id, payload):
+    markup = _telegram_reply_markup(account_email, message, chat_id)
+    if not _send_telegram_message(bot_token, chat_id, payload, reply_markup=markup):
         raise NotificationDispatchError(
             "TELEGRAM_SEND_FAILED",
             "Telegram 发送失败",
