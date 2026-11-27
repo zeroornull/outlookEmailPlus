@@ -75,7 +75,8 @@ jobs:
       - name: Install frontend dependencies
         run: |
           pnpm install --frozen-lockfile --ignore-scripts
-          pnpm rebuild
+          # Full hoisted rebuilds accumulate bin paths for every dependency in pnpm 10.
+          pnpm rebuild esbuild
           pnpm exec max setup
       - name: Build shared SPA
         run: pnpm run build
