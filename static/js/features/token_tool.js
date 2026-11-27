@@ -238,7 +238,11 @@ async function startOAuth() {
         panel.classList.remove('hidden');
     }
     document.getElementById('manual-exchange').open = true;
-    showStatus(t('授权链接已生成，请复制并在浏览器中打开'), 'success');
+    await copyText(
+        authorizeUrl,
+        t('授权链接已生成并复制'),
+        t('授权链接已生成，自动复制失败，请点击「复制链接」或手动复制链接')
+    );
 }
 
 function copyAuthorizeLink() {
@@ -352,12 +356,17 @@ function copyAllResults() {
     copyText(lines.join('\n'));
 }
 
-function copyText(text) {
-    navigator.clipboard.writeText(text || '').then(() => {
-        showStatus(t('内容已复制到剪贴板'), 'success');
-    }).catch(() => {
-        showStatus(t('复制失败，请手动复制'), 'error');
-    });
+async function copyText(
+    text,
+    successMessage = t('内容已复制到剪贴板'),
+    failureMessage = t('复制失败，请手动复制')
+) {
+    try {
+        await navigator.clipboard.writeText(text || '');
+        showStatus(successMessage, 'success');
+    } catch {
+        showStatus(failureMessage, 'error');
+    }
 }
 
 

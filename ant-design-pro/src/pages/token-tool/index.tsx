@@ -36,12 +36,13 @@ const TokenToolPage: React.FC = () => {
   const intl = useIntl();
   const [configForm] = Form.useForm();
   const [loading, setLoading] = useState(false);
+  const [configLoading, setConfigLoading] = useState(false);
   const [authorizeUrl, setAuthorizeUrl] = useState('');
   const [callbackUrl, setCallbackUrl] = useState('');
   const [tokenResult, setTokenResult] = useState<TokenResult | null>(null);
 
   const loadConfig = async () => {
-    setLoading(true);
+    setConfigLoading(true);
     try {
       const res = await fetchTokenToolConfig();
       if (res?.success === false) {
@@ -56,15 +57,22 @@ const TokenToolPage: React.FC = () => {
         scope: cfg.scope || DEFAULT_SCOPE,
         prompt_consent: !!cfg.prompt_consent,
       });
-    } catch (error: any) {
+    } catch (error: unknown) {
+      let responseData: unknown;
+      if (error && typeof error === 'object' && 'response' in error) {
+        const response = error.response;
+        if (response && typeof response === 'object' && 'data' in response) {
+          responseData = response.data;
+        }
+      }
       message.error(
         pickTokenToolError(
-          error?.response?.data,
-          error?.message || '加载配置失败',
+          responseData,
+          error instanceof Error ? error.message : '加载配置失败',
         ),
       );
     } finally {
-      setLoading(false);
+      setConfigLoading(false);
     }
   };
 
@@ -114,7 +122,12 @@ const TokenToolPage: React.FC = () => {
         message.error('授权地址为空');
         return;
       }
-      message.success('授权链接已生成');
+      try {
+        await navigator.clipboard.writeText(url);
+        message.success('授权链接已生成并复制');
+      } catch {
+        message.warning('授权链接已生成，自动复制失败，请点击「复制」或手动复制链接');
+      }
     } catch (error: any) {
       message.error(
         pickTokenToolError(error?.response?.data, error?.message || '生成失败'),
@@ -173,7 +186,7 @@ const TokenToolPage: React.FC = () => {
           ]}
         />
 
-        <ProCard title="OAuth 配置" variant="outlined" loading={loading && !authorizeUrl}>
+        <ProCard title="OAuth 配置" variant="outlined" loading={configLoading}>
           <Form
             form={configForm}
             layout="vertical"
@@ -227,7 +240,7 @@ const TokenToolPage: React.FC = () => {
             <Space wrap>
               <Button onClick={() => void onSaveConfig()}>保存配置</Button>
               <Button type="primary" loading={loading} onClick={() => void onPrepare()}>
-                生成授权链接
+                生成并复制授权链接
               </Button>
             </Space>
           </Form>
@@ -243,7 +256,7 @@ const TokenToolPage: React.FC = () => {
                     await navigator.clipboard.writeText(authorizeUrl);
                     message.success('已复制');
                   } catch {
-                    message.error('复制失败');
+                    message.error('复制失败，请选中授权链接后手动复制');
                   }
                 }}
               >
