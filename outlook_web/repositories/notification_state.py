@@ -68,6 +68,9 @@ def reset_channel_cursor(channel: str, source_type: str, source_key: str, cursor
         """,
         (channel, source_type, source_key, cursor_value or ""),
     )
+    from outlook_web.repositories.notification_outbox import cancel_source_deliveries
+
+    cancel_source_deliveries(source_type, source_key, channel, commit=False)
     db.commit()
 
 

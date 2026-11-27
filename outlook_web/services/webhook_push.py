@@ -9,13 +9,14 @@ from urllib.parse import urlparse
 import requests
 
 from outlook_web.repositories import settings as settings_repo
+from outlook_web.services.notification_transport import NotificationTransportError, retry_after_seconds
 
 logger = logging.getLogger(__name__)
 
 MAX_WEBHOOK_BODY_LENGTH = 4000
 
 
-class WebhookPushError(Exception):
+class WebhookPushError(NotificationTransportError):
     def __init__(
         self,
         code: str,
@@ -27,8 +28,9 @@ class WebhookPushError(Exception):
         status_code: int | None = None,
         duration_ms: int | None = None,
         attempts: int | None = None,
+        retry_after: float | None = None,
     ) -> None:
-        super().__init__(message)
+        super().__init__(message, code=code, retry_after=retry_after, status=status)
         self.code = code
         self.message = message
         self.message_en = message_en
@@ -136,6 +138,18 @@ def send_webhook_message(
                     "duration_ms": round((perf_counter() - started_at) * 1000),
                     "attempts": attempt,
                 }
+            if response.status_code == 429:
+                delay = retry_after_seconds(response.headers.get("Retry-After"))
+                raise WebhookPushError(
+                    "WEBHOOK_RATE_LIMITED",
+                    "Webhook 请求过于频繁",
+                    message_en="Webhook rate limit exceeded",
+                    status=429,
+                    status_code=429,
+                    retry_after=delay if delay is not None else 60.0,
+                    duration_ms=round((perf_counter() - started_at) * 1000),
+                    attempts=attempt,
+                )
             last_error = WebhookPushError(
                 "WEBHOOK_SEND_FAILED",
                 "Webhook 发送失败",
@@ -242,6 +256,7 @@ def send_test_webhook_message() -> dict[str, Any]:
             status_code=exc.status_code,
             duration_ms=exc.duration_ms,
             attempts=exc.attempts,
+            retry_after=exc.retry_after,
         ) from exc
 
     return {

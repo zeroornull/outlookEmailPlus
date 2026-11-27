@@ -1,23 +1,21 @@
-"""outlook_web/services/telegram_push.py — Telegram 实时推送核心服务
-
-轮询 IMAP/Graph 读取新邮件 → 构造消息 → 调用 Telegram Bot API → 丢弃内容，仅更新游标。
-"""
+"""Telegram formatting/sending and mailbox fetches for queued notifications."""
 
 from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import List
 
 import requests
 
-from outlook_web.repositories import notification_state as notification_state_repo
 from outlook_web.services import notification_dispatch
 from outlook_web.services.providers import (
     get_imap_folder_candidates,
     infer_provider_from_email,
 )
+from outlook_web.services.notification_transport import NotificationTransportError, retry_after_seconds
+from outlook_web.services.imap_generic import decode_header_value
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +27,6 @@ MAX_TELEGRAM_LENGTH = 4096
 TELEGRAM_TEXT_LIMIT = 3500
 MAX_PREVIEW_LENGTH = 200
 MAX_EMAILS_PER_FETCH = 50
-MAX_SENT_PER_JOB = 20
-TELEGRAM_PUSH_DELAY_SEC = 1.5  # 连续发送 Telegram 消息的间隔（防限流）
 
 
 def _quote_imap_folder_name(folder_name: str) -> list[str]:
@@ -184,9 +180,17 @@ def _send_telegram_message(
         if not resp.ok and reply_markup and resp.status_code == 400:
             logger.warning("[telegram_push] inline buttons rejected, retrying without them")
             resp = post(None)
+        if resp.status_code == 429:
+            try:
+                retry_after = retry_after_seconds(resp.json().get("parameters", {}).get("retry_after"))
+            except (ValueError, AttributeError, TypeError):
+                retry_after = None
+            raise NotificationTransportError("Telegram rate limited", code="TELEGRAM_RATE_LIMITED", retry_after=retry_after if retry_after is not None else retry_after_seconds(resp.headers.get("Retry-After")), status=429)
         if not resp.ok:
             logger.warning("[telegram_push] send HTTP %s: %s", resp.status_code, resp.text[:200])
         return resp.ok
+    except NotificationTransportError:
+        raise
     except Exception as e:
         logger.warning("[telegram_push] send failed: %s", e)
         return False
@@ -208,36 +212,47 @@ def _resolve_imap_folder(account: dict, folder: str) -> list[str]:
     return resolved or ["INBOX"]
 
 
-def _should_fetch_account_via_graph(account: dict) -> bool:
-    account_type = str(account.get("account_type") or "").strip().lower()
-    if account_type:
-        return account_type == "outlook"
-    return str(account.get("provider") or "").strip().lower() == "outlook"
-
-
-def _call_fetcher_with_folder(fetcher, account: dict, since: str, folder: str) -> List[dict]:
-    try:
-        return fetcher(account, since, folder=folder)
-    except TypeError as exc:
-        if "unexpected keyword argument 'folder'" not in str(exc):
-            raise
-        return fetcher(account, since)
-
-
-def _deduplicate_emails_for_source(account: dict, emails: List[dict]) -> List[dict]:
-    source = {
-        "source_type": notification_dispatch.SOURCE_ACCOUNT,
-        "source_key": notification_dispatch.build_source_key(notification_dispatch.SOURCE_ACCOUNT, account.get("email", "")),
-    }
-    deduped: list[dict] = []
-    seen: set[str] = set()
-    for email_item in sorted(emails, key=lambda item: item.get("received_at", "")):
-        message_key = notification_dispatch.build_message_key(source, email_item)
-        if message_key in seen:
+def _resolve_listed_imap_junk_folders(conn, account: dict) -> list[str]:
+    """Only a complete successful LIST can establish optional junk absence."""
+    status, data = conn.list()
+    if status != "OK" or not isinstance(data, (list, tuple)):
+        raise NotificationTransportError("IMAP folder listing failed", code="IMAP_LIST_FAILED")
+    junk_names = {name.strip('"').casefold() for name in _resolve_imap_folder(account, "junkemail")}
+    junk_names.update({"junk", "junk email", "junkemail", "spam", "bulk mail", "垃圾邮件"})
+    special_use, named = [], []
+    for item in data:
+        if item is None:
             continue
-        seen.add(message_key)
-        deduped.append(email_item)
-    return deduped
+        # imaplib represents literal mailbox names as (metadata, literal).
+        literal = None
+        if isinstance(item, tuple) and len(item) == 2:
+            item, literal = item
+        if not isinstance(item, bytes):
+            raise NotificationTransportError("Invalid IMAP folder listing", code="IMAP_LIST_FAILED")
+        match = re.fullmatch(rb'\(([^)]*)\)\s+(NIL|"(?:\\.|[^"\\])*"|[^\s]+)\s+("(?:\\.|[^"\\])*"|[^\s]+)', item)
+        if not match:
+            raise NotificationTransportError("Invalid IMAP folder listing", code="IMAP_LIST_FAILED")
+
+        def unquote(value: bytes) -> str:
+            if value.startswith(b'"') and value.endswith(b'"'):
+                value = re.sub(rb'\\(.)', rb'\1', value[1:-1])
+            return value.decode("utf-8", errors="replace")
+
+        flags = match.group(1).lower().split()
+        delimiter = "" if match.group(2).upper() == b"NIL" else unquote(match.group(2))
+        if literal is not None:
+            if not isinstance(literal, bytes) or match.group(3) != b"{" + str(len(literal)).encode("ascii") + b"}":
+                raise NotificationTransportError("Invalid IMAP folder literal", code="IMAP_LIST_FAILED")
+            name = literal.decode("utf-8", errors="replace")
+        else:
+            name = unquote(match.group(3))
+        suffix = name.rsplit(delimiter, 1)[-1] if delimiter else name
+        target = _quote_imap_folder_name(name)[-1]
+        if b"\\junk" in flags:
+            special_use.append(target)
+        elif name.casefold() in junk_names or suffix.casefold() in junk_names:
+            named.append(target)
+    return list(dict.fromkeys(special_use + named))
 
 
 def _should_fetch_account_via_graph(account: dict) -> bool:
@@ -245,560 +260,186 @@ def _should_fetch_account_via_graph(account: dict) -> bool:
     if account_type:
         return account_type == "outlook"
     return str(account.get("provider") or "").strip().lower() == "outlook"
+
 
 
 def _fetch_new_emails_imap(account: dict, since: str, folder: str = "inbox") -> List[dict]:
-    """通过 IMAP 获取 received_at > since 的邮件，最多返回 50 封。
-
-    两步策略：先用 INTERNALDATE 快速过滤，再对命中的邮件下载正文。
-    """
+    """Drain matching UIDs in sequential batches using server arrival time."""
     import email as email_lib
-    import email.header
     import imaplib
-    from datetime import datetime as dt
-
     from outlook_web.security.crypto import decrypt_data
 
-    host = account.get("imap_host", "")
-    port = int(account.get("imap_port", 993))
-    password_raw = account.get("imap_password", "")
-    password = decrypt_data(password_raw) if password_raw else ""
-    user = account.get("email", "")
-
-    since_dt = dt.fromisoformat(since)
-    since_date_str = since_dt.strftime("%d-%b-%Y")
-
-    results: List[dict] = []
+    since = notification_dispatch._extract_message_timestamp(since)
+    since_date = datetime.fromisoformat(since).strftime("%d-%b-%Y")
     conn = None
+    results = []
     try:
-        conn = imaplib.IMAP4_SSL(host, port, timeout=15)
-        try:
-            conn.login(user, password)
-        except imaplib.IMAP4.error as exc:
-            raw_message = str(exc or "")
-            lowered = raw_message.lower()
-            if (account.get("provider") or "").strip().lower() == "outlook" and "basicauthblocked" in lowered:
-                raise RuntimeError("Outlook.com 已阻止 Basic Auth（账号密码直连）；请将该账号改为 Outlook OAuth 导入") from exc
-            raise
-        selected = False
-        last_select_error = None
-        for folder_name in _resolve_imap_folder(account, folder):
-            try:
-                status, _ = conn.select(folder_name, readonly=True)
-                if status == "OK":
-                    selected = True
-                    break
-                last_select_error = f"select {folder_name} status={status}"
-            except Exception as exc:
-                last_select_error = str(exc)
-                continue
-        if not selected:
-            logger.warning(
-                "[telegram_push] folder select failed email=%s provider=%s folder=%s err=%s",
-                user,
-                account.get("provider"),
-                folder,
-                last_select_error or "unknown",
-            )
-            return results
-
-        _, data = conn.search(None, f'(SINCE "{since_date_str}")')
-        msg_ids = data[0].split() if data[0] else []
-
-        if not msg_ids:
-            return results
-
-        # 第一步：批量获取 INTERNALDATE 快速过滤
-        candidate_ids = msg_ids[-MAX_EMAILS_PER_FETCH:]
-        id_range = b",".join(candidate_ids)
-        _, date_data = conn.fetch(id_range, "(INTERNALDATE)")
-
-        import re
-
-        date_pattern = re.compile(rb'INTERNALDATE "([^"]+)"')
-        new_msg_ids = []
-
-        for item in date_data:
-            if not isinstance(item, tuple):
-                continue
-            header_line = item[0] if isinstance(item[0], bytes) else b""
-            mid_match = re.match(rb"(\d+)", header_line)
-            date_match = date_pattern.search(header_line)
-            if not mid_match or not date_match:
-                continue
-
-            mid = mid_match.group(1)
-            idate_str = date_match.group(1).decode("ascii", errors="replace")
-            try:
-                import calendar
-                from imaplib import Internaldate2tuple
-
-                tt = Internaldate2tuple(b'"' + date_match.group(1) + b'"')
-                if tt:
-                    ts = calendar.timegm(tt)
-                    idate_iso = dt.utcfromtimestamp(ts).strftime("%Y-%m-%dT%H:%M:%S")
-                    if idate_iso <= since:
-                        continue
-            except Exception:
-                pass  # 解析失败时保留，由后续 RFC822 过滤
-            new_msg_ids.append(mid)
-
-        # 第二步：仅对候选邮件下载 RFC822
-        for mid in new_msg_ids[-MAX_EMAILS_PER_FETCH:]:
-            try:
-                _, msg_data = conn.fetch(mid, "(RFC822)")
-                raw = msg_data[0][1]
-                msg = email_lib.message_from_bytes(raw)
-
-                subject_parts = email.header.decode_header(msg.get("Subject", ""))
-                subject = "".join(
-                    part.decode(charset or "utf-8") if isinstance(part, bytes) else part for part, charset in subject_parts
-                )
-
-                sender = msg.get("From", "")
-                # 提取 Message-ID（BUG-00011 P2 去重用）
-                raw_message_id = msg.get("Message-ID", "") or msg.get("Message-Id", "")
-                if not raw_message_id:
-                    raw_message_id = f"imap:{account.get('email', '')}:{mid.decode() if isinstance(mid, bytes) else mid}"
-                date_str = msg.get("Date", "")
-                try:
-                    from email.utils import parsedate_to_datetime
-
-                    received_dt = parsedate_to_datetime(date_str)
-                    if received_dt.tzinfo is not None:
-                        received_dt = received_dt.astimezone(timezone.utc)
-                    received_iso = received_dt.strftime("%Y-%m-%dT%H:%M:%S")
-                except Exception:
-                    received_iso = date_str
-
-                if received_iso <= since:
+        conn = imaplib.IMAP4_SSL(account.get("imap_host", ""), int(account.get("imap_port", 993)), timeout=15)
+        conn.login(account.get("email", ""), decrypt_data(account.get("imap_password", "")))
+        candidates = (_resolve_listed_imap_junk_folders(conn, account)
+                      if folder == "junkemail" else _resolve_imap_folder(account, folder))
+        if folder == "junkemail" and not candidates:
+            return []
+        for folder_name in candidates:
+            status, _ = conn.select(folder_name, readonly=True)
+            if status == "OK":
+                break
+            if folder == "junkemail" or status != "NO":
+                raise NotificationTransportError("IMAP folder selection failed", code="IMAP_SELECT_FAILED")
+        else:
+            raise NotificationTransportError("IMAP folder selection failed", code="IMAP_SELECT_FAILED")
+        _, validity_data = conn.response("UIDVALIDITY")
+        validity = validity_data[0].decode("ascii") if validity_data and validity_data[0] else ""
+        status, data = conn.uid("search", None, f'(SINCE "{since_date}")')
+        if status != "OK" or not data or not isinstance(data[0], bytes):
+            raise NotificationTransportError("IMAP UID search failed", code="IMAP_SEARCH_FAILED")
+        uids = sorted(data[0].split(), key=int)
+        for offset in range(0, len(uids), MAX_EMAILS_PER_FETCH):
+            batch = uids[offset:offset + MAX_EMAILS_PER_FETCH]
+            status, date_data = conn.uid("fetch", b",".join(batch), "(UID INTERNALDATE)")
+            if status != "OK":
+                raise NotificationTransportError("IMAP date fetch failed", code="IMAP_FETCH_FAILED")
+            arrivals = {}
+            for item in date_data or []:
+                header = item[0] if isinstance(item, tuple) else item
+                if not isinstance(header, bytes):
                     continue
-
-                body = ""
-                html_content = ""
+                uid = re.search(rb"\bUID (\d+)", header, re.I)
+                date = re.search(rb'INTERNALDATE "([^"]+)"', header, re.I)
+                if uid and date:
+                    arrivals[uid.group(1)] = notification_dispatch._extract_message_timestamp(datetime.strptime(date.group(1).decode("ascii").strip(), "%d-%b-%Y %H:%M:%S %z").isoformat())
+            if any(uid not in arrivals for uid in batch):
+                raise NotificationTransportError("Incomplete IMAP date batch", code="IMAP_FETCH_INCOMPLETE")
+            selected = [uid for uid in batch if arrivals[uid] >= since]
+            if not selected:
+                continue
+            status, body_data = conn.uid("fetch", b",".join(selected), "(UID BODY.PEEK[])")
+            if status != "OK":
+                raise NotificationTransportError("IMAP body fetch failed", code="IMAP_FETCH_FAILED")
+            fetched = set()
+            for item in body_data or []:
+                if not isinstance(item, tuple) or len(item) < 2 or not isinstance(item[0], bytes):
+                    continue
+                match = re.search(rb"\bUID (\d+)", item[0], re.I)
+                if not match or match.group(1) not in selected or not isinstance(item[1], bytes):
+                    continue
+                uid = match.group(1)
+                fetched.add(uid)
+                msg = email_lib.message_from_bytes(item[1])
+                subject = decode_header_value(msg.get("Subject", ""))
+                body, html_content = "", ""
                 for part in msg.walk():
                     if part.get_content_disposition() == "attachment" or part.get_filename():
                         continue
-                    ct = part.get_content_type()
-                    if ct not in {"text/plain", "text/html"}:
+                    content_type = part.get_content_type()
+                    if content_type not in {"text/plain", "text/html"}:
                         continue
                     payload = part.get_payload(decode=True)
                     if not payload:
                         continue
-                    decoded = payload.decode(part.get_content_charset() or "utf-8", errors="replace")
-                    if ct == "text/plain" and not body:
+                    try:
+                        decoded = payload.decode(part.get_content_charset() or "utf-8", errors="replace")
+                    except (LookupError, ValueError):
+                        decoded = payload.decode("utf-8", errors="replace")
+                    if content_type == "text/plain" and not body:
                         body = decoded
-                    elif ct == "text/html" and not html_content:
+                    elif content_type == "text/html" and not html_content:
                         html_content = decoded
                 if not body and html_content:
                     body = _html_to_plain(html_content)
-
-                preview = body[:MAX_PREVIEW_LENGTH] if body else ""
-
-                results.append(
-                    {
-                        "message_id": raw_message_id.strip(),
-                        "subject": subject,
-                        "sender": sender,
-                        "received_at": received_iso,
-                        "preview": preview,
-                        "content": body,
-                        "html_content": html_content,
-                        "folder": folder,
-                    }
-                )
-            except Exception:
-                continue
-
-    except Exception as e:
-        logger.warning("[telegram_push] IMAP fetch error for %s: %s", account.get("email"), e)
-        raise
+                message_id = str(msg.get("Message-ID") or "").strip()
+                if not message_id:
+                    if not validity:
+                        raise NotificationTransportError("IMAP UIDVALIDITY missing", code="IMAP_UIDVALIDITY_MISSING")
+                    message_id = f"imap:{account.get('email', '')}:{folder}:{validity}:{uid.decode('ascii')}"
+                results.append({"message_id": message_id, "subject": subject, "sender": msg.get("From", ""),
+                                "received_at": arrivals[uid], "preview": body[:MAX_PREVIEW_LENGTH],
+                                "content": body, "html_content": html_content, "folder": folder})
+            if fetched != set(selected):
+                raise NotificationTransportError("Incomplete IMAP body batch", code="IMAP_FETCH_INCOMPLETE")
     finally:
-        if conn:
+        if conn is not None:
             try:
                 conn.logout()
             except Exception:
                 pass
-
-    return results[:MAX_EMAILS_PER_FETCH]
+    return sorted(results, key=lambda item: (item["received_at"], item["message_id"]))
 
 
 def _fetch_new_emails_graph(account: dict, since: str, folder: str = "inbox") -> List[dict]:
-    """通过 Microsoft Graph API 获取 received_at > since 的邮件，最多返回 50 封。"""
+    """Drain Graph pages; incomplete fetches must retain the source cursor."""
+    from urllib.parse import urlsplit
     from outlook_web.security.crypto import decrypt_data
-    from outlook_web.services.graph import build_proxies, get_access_token_graph
+    from outlook_web.repositories import accounts as accounts_repo
+    from outlook_web.services.graph import build_proxies, get_access_token_graph_result, invalidate_graph_access_token
 
     client_id = account.get("client_id", "")
-    refresh_token_raw = account.get("refresh_token", "")
-    refresh_token = decrypt_data(refresh_token_raw) if refresh_token_raw else ""
+    refresh_token = decrypt_data(account.get("refresh_token", ""))
     proxy_url = account.get("proxy_url", "") or ""
-
-    access_token = get_access_token_graph(client_id, refresh_token, proxy_url)
-    if not access_token:
-        return []
-
-    since_z = since if since.endswith("Z") else since + "Z"
+    token_result = get_access_token_graph_result(client_id, refresh_token, proxy_url)
+    if not token_result.get("success") or not token_result.get("access_token"):
+        error = token_result.get("error") or {}
+        code = error.get("code", "GRAPH_AUTH_FAILED") if isinstance(error, dict) else str(error)
+        status = error.get("status", 401) if isinstance(error, dict) else 401
+        raise NotificationTransportError("Graph token acquisition failed", code=code, retry_after=token_result.get("retry_after"), status=status)
+    rotated = token_result.get("new_refresh_token") or token_result.get("refresh_token")
+    if rotated and rotated != refresh_token:
+        if account.get("id"):
+            accounts_repo.update_refresh_token_if_changed(int(account["id"]), rotated)
+        account["refresh_token"] = rotated
+        refresh_token = rotated
     folder_name = (folder or "inbox").strip().lower()
+    if folder_name not in notification_dispatch.ACCOUNT_INCLUDED_FOLDERS:
+        raise ValueError("Unsupported notification Graph folder")
     url = f"https://graph.microsoft.com/v1.0/me/mailFolders/{folder_name}/messages"
-    params = {
-        "$filter": f"receivedDateTime gt {since_z}",
-        "$top": MAX_EMAILS_PER_FETCH,
-        "$select": "id,subject,from,receivedDateTime,bodyPreview,internetMessageId,body",
-        "$orderby": "receivedDateTime asc",
-    }
-    headers = {"Authorization": f"Bearer {access_token}"}
+    params = {"$filter": f"receivedDateTime ge {notification_dispatch._extract_message_timestamp(since)}Z",
+              "$top": MAX_EMAILS_PER_FETCH, "$select": "id,subject,from,receivedDateTime,bodyPreview,internetMessageId,body",
+              "$orderby": "receivedDateTime asc"}
+    headers = {"Authorization": f"Bearer {token_result['access_token']}"}
     proxies = build_proxies(proxy_url)
-
-    results: List[dict] = []
-    try:
-        resp = requests.get(url, headers=headers, params=params, timeout=15, proxies=proxies)
+    results, seen_pages = [], set()
+    while url:
+        target = urlsplit(url)
+        if target.scheme != "https" or target.hostname != "graph.microsoft.com" or target.port not in {None, 443} or target.username or target.password:
+            raise NotificationTransportError("Unsafe Graph pagination URL", code="GRAPH_INVALID_NEXT_LINK")
+        if url in seen_pages:
+            raise NotificationTransportError("Repeated Graph pagination URL", code="GRAPH_INVALID_NEXT_LINK")
+        seen_pages.add(url)
+        try:
+            resp = requests.get(url, headers=headers, params=params, timeout=15, proxies=proxies)
+        except requests.RequestException as exc:
+            raise NotificationTransportError("Graph request failed", code="GRAPH_FETCH_FAILED") from exc
         if not resp.ok:
-            return []
-        data = resp.json()
-        for item in data.get("value", []):
+            if resp.status_code == 401:
+                invalidate_graph_access_token(client_id, refresh_token, proxy_url)
+            raise NotificationTransportError("Graph message fetch failed", code="GRAPH_RATE_LIMITED" if resp.status_code == 429 else "GRAPH_FETCH_FAILED", retry_after=retry_after_seconds(resp.headers.get("Retry-After")), status=resp.status_code)
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise NotificationTransportError("Invalid Graph message response", code="GRAPH_INVALID_RESPONSE") from exc
+        if not isinstance(data, dict) or not isinstance(data.get("value"), list):
+            raise NotificationTransportError("Invalid Graph message response", code="GRAPH_INVALID_RESPONSE")
+        for item in data["value"]:
             sender_info = (item.get("from") or {}).get("emailAddress") or {}
-            sender_name = (sender_info.get("name") or "").strip()
-            sender_address = (sender_info.get("address") or "").strip()
-            if sender_name and sender_address and sender_name.casefold() != sender_address.casefold():
-                sender = f"{sender_name} <{sender_address}>"
-            else:
-                sender = sender_address or sender_name
-            received_raw = item.get("receivedDateTime", "")
-            received_iso = received_raw.replace("Z", "").split(".")[0] if received_raw else ""
-            preview = (item.get("bodyPreview", "") or "")[:MAX_PREVIEW_LENGTH]
-            body = ""
+            name, address = (sender_info.get("name") or "").strip(), (sender_info.get("address") or "").strip()
+            sender = f"{name} <{address}>" if name and address and name.casefold() != address.casefold() else address or name
+            try:
+                received_at = notification_dispatch._extract_message_timestamp(item.get("receivedDateTime"))
+            except (TypeError, ValueError) as exc:
+                raise NotificationTransportError("Invalid Graph message timestamp", code="GRAPH_INVALID_RESPONSE") from exc
+            if not received_at:
+                raise NotificationTransportError("Graph message timestamp missing", code="GRAPH_INVALID_RESPONSE")
             body_info = item.get("body") or {}
-            html_content = ""
-            if str(body_info.get("contentType") or "").lower() == "html":
-                html_content = body_info.get("content", "") or ""
-                body = _html_to_plain(html_content)
-            else:
-                body = body_info.get("content", "") or ""
-            # BUG-00011 P2: 提取 Message-ID（优先 internetMessageId，回退 Graph id）
-            msg_id = item.get("internetMessageId", "") or item.get("id", "")
-            results.append(
-                {
-                    "message_id": msg_id,
-                    "subject": item.get("subject", ""),
-                    "sender": sender,
-                    "received_at": received_iso,
-                    "preview": preview,
-                    "content": body,
-                    "html_content": html_content,
-                    "folder": folder_name,
-                }
-            )
-    except Exception as e:
-        logger.warning("[telegram_push] Graph fetch error for %s: %s", account.get("email"), e)
-        raise
-
+            html_content = (body_info.get("content") or "") if str(body_info.get("contentType") or "").lower() == "html" else ""
+            body = _html_to_plain(html_content) if html_content else body_info.get("content", "") or ""
+            results.append({"message_id": item.get("internetMessageId") or item.get("id", ""),
+                            "subject": item.get("subject", ""), "sender": sender, "received_at": received_at,
+                            "preview": (item.get("bodyPreview") or "")[:MAX_PREVIEW_LENGTH],
+                            "content": body, "html_content": html_content, "folder": folder_name})
+        url = data.get("@odata.nextLink")
+        if url is not None and not isinstance(url, str):
+            raise NotificationTransportError("Invalid Graph pagination URL", code="GRAPH_INVALID_NEXT_LINK")
+        params = None
     return results
 
 
-# ---------------------------------------------------------------------------
-# Message-ID 去重（BUG-00011 P2）
-# ---------------------------------------------------------------------------
-
-PUSH_LOG_RETENTION_DAYS = 7  # 去重记录保留天数
-
-
-def _is_message_pushed(db, account_id: int, message_id: str) -> bool:
-    """检查该邮件是否已推送过。"""
-    row = db.execute(
-        "SELECT 1 FROM telegram_push_log WHERE account_id = ? AND message_id = ?",
-        (account_id, message_id),
-    ).fetchone()
-    return row is not None
-
-
-def _record_pushed_message(db, account_id: int, message_id: str) -> None:
-    """记录已推送的邮件 Message-ID。"""
-    try:
-        db.execute(
-            "INSERT OR IGNORE INTO telegram_push_log (account_id, message_id, pushed_at) VALUES (?, ?, ?)",
-            (
-                account_id,
-                message_id,
-                datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
-            ),
-        )
-        db.commit()
-    except Exception:
-        pass  # 去重失败不影响推送流程
-
-
-def _cleanup_push_log(db) -> None:
-    """清理超过 PUSH_LOG_RETENTION_DAYS 天的去重记录。"""
-    try:
-        from datetime import timedelta
-
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=PUSH_LOG_RETENTION_DAYS)).strftime("%Y-%m-%dT%H:%M:%S")
-        db.execute("DELETE FROM telegram_push_log WHERE pushed_at < ?", (cutoff,))
-        db.commit()
-    except Exception:
-        pass
-
-
-def _has_message_been_sent(source: dict, message_key: str) -> bool:
-    if notification_state_repo.was_delivered(
-        notification_dispatch.CHANNEL_TELEGRAM,
-        source["source_type"],
-        source["source_key"],
-        message_key,
-    ):
-        return True
-
-    legacy_row = None
-    try:
-        from outlook_web.db import get_db
-
-        db = get_db()
-        legacy_row = db.execute(
-            "SELECT 1 FROM telegram_push_log WHERE account_id = ? AND message_id = ?",
-            (source.get("account_id"), message_key),
-        ).fetchone()
-    except Exception:
-        legacy_row = None
-    return legacy_row is not None
-
-
-def _record_sent_message(source: dict, message_key: str) -> None:
-    from outlook_web.db import get_db
-
-    notification_state_repo.complete_delivery_attempt(
-        notification_dispatch.CHANNEL_TELEGRAM,
-        source["source_type"],
-        source["source_key"],
-        message_key,
-        status="sent",
-    )
-    if source.get("account_id"):
-        _record_pushed_message(get_db(), int(source["account_id"]), message_key)
-
-
-def _record_failed_message(source: dict, message_key: str, error: Exception | str) -> None:
-    notification_state_repo.complete_delivery_attempt(
-        notification_dispatch.CHANNEL_TELEGRAM,
-        source["source_type"],
-        source["source_key"],
-        message_key,
-        status="failed",
-        error_code=getattr(error, "code", "TELEGRAM_SEND_FAILED"),
-        error_message=str(error),
-    )
-
-
-# ---------------------------------------------------------------------------
-# 主入口（调度器调用）
-# ---------------------------------------------------------------------------
-
-
-def _fetch_account_emails(account: dict) -> tuple:
-    """并行获取单个账号新邮件，返回 (account, emails_list, error)。"""
-    last_checked = account.get("notification_cursor") or account.get("telegram_last_checked_at")
-    if last_checked is None:
-        return (account, None, None)  # 首次运行，仅设置游标
-
-    try:
-        if _should_fetch_account_via_graph(account):
-            emails: List[dict] = []
-            for folder in notification_dispatch.ACCOUNT_INCLUDED_FOLDERS:
-                emails.extend(_call_fetcher_with_folder(_fetch_new_emails_graph, account, last_checked, folder))
-        else:
-            emails = []
-            for folder in notification_dispatch.ACCOUNT_INCLUDED_FOLDERS:
-                emails.extend(_call_fetcher_with_folder(_fetch_new_emails_imap, account, last_checked, folder))
-
-        emails = _deduplicate_emails_for_source(account, emails)
-
-        logger.info(
-            "[telegram_push] account=%s provider=%s since=%s found=%d",
-            account.get("email"),
-            account.get("provider"),
-            last_checked,
-            len(emails),
-        )
-        return (account, emails, None)
-    except Exception as e:
-        logger.warning("[telegram_push] account=%s error: %s", account.get("email"), e)
-        return (account, None, e)
-
-
-def run_telegram_push_job(app) -> None:
-    """主入口：并行轮询 → 去重 → 推送 → 更新游标。由调度器调用。"""
-    import time
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    t0 = time.monotonic()
-    logger.info("[telegram_push] job started")
-
-    with app.app_context():
-        from outlook_web.db import get_db
-        from outlook_web.repositories.accounts import (
-            get_telegram_push_accounts,
-            update_telegram_cursor,
-        )
-        from outlook_web.repositories.settings import get_setting
-        from outlook_web.security.crypto import decrypt_data, is_encrypted
-
-        bot_token_raw = get_setting("telegram_bot_token", "")
-        bot_token = decrypt_data(bot_token_raw) if bot_token_raw and is_encrypted(bot_token_raw) else bot_token_raw
-        chat_id = get_setting("telegram_chat_id", "")
-
-        if not bot_token or not chat_id:
-            logger.info("[telegram_push] job skipped: no bot_token or chat_id")
-            return
-
-        accounts = get_telegram_push_accounts()
-        if not accounts:
-            logger.info("[telegram_push] job skipped: no push-enabled accounts")
-            return
-
-        normalized_accounts = []
-        for account in accounts:
-            source_key = notification_dispatch.build_source_key(notification_dispatch.SOURCE_ACCOUNT, account.get("email", ""))
-            notification_cursor = notification_state_repo.get_cursor(
-                notification_dispatch.CHANNEL_TELEGRAM,
-                notification_dispatch.SOURCE_ACCOUNT,
-                source_key,
-            )
-            account_copy = dict(account)
-            account_copy["source_type"] = notification_dispatch.SOURCE_ACCOUNT
-            account_copy["source_key"] = source_key
-            account_copy["account_id"] = account.get("id")
-            account_copy["notification_cursor"] = notification_cursor
-            normalized_accounts.append(account_copy)
-
-        job_start_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
-        sent_count = 0
-        dedup_skipped = 0
-
-        db = get_db()
-
-        # 并行获取所有账号邮件
-        fetch_results = []
-        with ThreadPoolExecutor(max_workers=min(len(normalized_accounts), 10)) as executor:
-            futures = {executor.submit(_fetch_account_emails, acc): acc for acc in normalized_accounts}
-            for future in as_completed(futures):
-                fetch_results.append(future.result())
-
-        # 顺序推送 + 更新游标
-        for account, emails, error in fetch_results:
-            current_cursor = account.get("notification_cursor") or account.get("telegram_last_checked_at") or ""
-            if emails is None and error is None:
-                # 首次运行，仅设置游标
-                update_telegram_cursor(account["id"], job_start_time)
-                notification_state_repo.upsert_cursor(
-                    notification_dispatch.CHANNEL_TELEGRAM,
-                    account["source_type"],
-                    account["source_key"],
-                    job_start_time,
-                )
-                continue
-
-            if error is not None:
-                # fetch 失败，不推进游标
-                continue
-
-            safe_cursor = current_cursor
-
-            if sent_count >= MAX_SENT_PER_JOB:
-                continue
-
-            account_id = account["id"]
-            for em in sorted(emails, key=lambda e: e.get("received_at", "")):
-                if sent_count >= MAX_SENT_PER_JOB:
-                    break
-                message_received_at = str(em.get("received_at", "") or "")
-                message_key = notification_dispatch.build_message_key(
-                    {
-                        "source_type": account["source_type"],
-                        "source_key": account["source_key"],
-                    },
-                    em,
-                )
-                claim_result = notification_state_repo.claim_delivery_attempt(
-                    notification_dispatch.CHANNEL_TELEGRAM,
-                    account["source_type"],
-                    account["source_key"],
-                    message_key,
-                )
-                source_meta = {
-                    "source_type": account["source_type"],
-                    "source_key": account["source_key"],
-                    "account_id": account_id,
-                }
-                if claim_result == "sent":
-                    dedup_skipped += 1
-                    if message_received_at:
-                        safe_cursor = notification_dispatch._max_cursor_value(safe_cursor, message_received_at)
-                    continue
-                if _has_message_been_sent(source_meta, message_key):
-                    notification_state_repo.complete_delivery_attempt(
-                        notification_dispatch.CHANNEL_TELEGRAM,
-                        account["source_type"],
-                        account["source_key"],
-                        message_key,
-                        status="sent",
-                    )
-                    dedup_skipped += 1
-                    if message_received_at:
-                        safe_cursor = notification_dispatch._max_cursor_value(safe_cursor, message_received_at)
-                    continue
-                if claim_result != "acquired":
-                    logger.info(
-                        "[telegram_push] skip delivery without lock account=%s message=%s state=%s",
-                        account.get("email"),
-                        message_key,
-                        claim_result,
-                    )
-                    continue
-
-                msg = _build_telegram_message(account["email"], em)
-                if _send_telegram_message(
-                    bot_token, chat_id, msg, reply_markup=_telegram_reply_markup(account["email"], em, chat_id)
-                ):
-                    sent_count += 1
-                    _record_sent_message(
-                        {
-                            "source_type": account["source_type"],
-                            "source_key": account["source_key"],
-                            "account_id": account_id,
-                        },
-                        message_key,
-                    )
-                    if message_received_at:
-                        safe_cursor = notification_dispatch._max_cursor_value(safe_cursor, message_received_at)
-                    # 消息间延迟，防止 Telegram API 限流
-                    if TELEGRAM_PUSH_DELAY_SEC > 0:
-                        time.sleep(TELEGRAM_PUSH_DELAY_SEC)
-                else:
-                    _record_failed_message(
-                        {
-                            "source_type": account["source_type"],
-                            "source_key": account["source_key"],
-                            "account_id": account_id,
-                        },
-                        message_key,
-                        "telegram_send_failed",
-                    )
-                    break
-
-            update_telegram_cursor(account["id"], safe_cursor)
-            notification_state_repo.upsert_cursor(
-                notification_dispatch.CHANNEL_TELEGRAM,
-                account["source_type"],
-                account["source_key"],
-                safe_cursor,
-            )
-
-        # 定期清理过期去重记录（>7 天）
-        _cleanup_push_log(db)
-
-    elapsed = time.monotonic() - t0
-    logger.info(
-        "[telegram_push] job finished: sent=%d dedup_skipped=%d elapsed=%.1fs",
-        sent_count,
-        dedup_skipped,
-        elapsed,
-    )

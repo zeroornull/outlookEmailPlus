@@ -373,6 +373,16 @@ The Settings page supports:
 
 In the current version, Telegram push and business email notifications are both handled by the unified notification-dispatch flow.
 
+### Notification Scheduling and Storage
+
+- Keep the configured polling interval and check up to four mailboxes concurrently. Check each mailbox's Inbox and Junk folders sequentially, sharing fetched messages across enabled channels.
+- Cache Graph access tokens for their reported lifetime and merge concurrent refreshes for the same credentials. Honor upstream `Retry-After` instead of immediately retrying throttled requests.
+- Fetching persists notification tasks. A separate delivery job runs every second, so a slow SMTP, Telegram, or Webhook destination does not block mailbox checks. Telegram delivery is paced per chat, with a lower rate for groups.
+- Store each pending message payload once, without adding attachment or raw-MIME storage or persisting account/channel credentials. Remove payloads after all deliveries terminate; pending tasks expire after 24 hours and compact delivery logs are retained for 14 days.
+- Pending encrypted payloads and task metadata share a 32 MiB budget and a 10,000-delivery-task limit. One message sent to three channels uses three tasks and one shared payload. Capacity failures are logged without advancing synchronization progress. Existing temporary-mail caches, Telegram preview snapshots, indexes, and the SQLite WAL are outside this budget. Deleted database pages are reused; the database file may not shrink immediately.
+- Run one scheduler process; increasing Gunicorn workers is not a notification-throughput control. Initial setup does not backfill historical mail, and disabling account notifications cancels pending deliveries.
+
+
 ## External API and Mail Pool Integration
 
 If you want to connect this project to registration workers, script platforms, or other automation systems, the recommended path is the controlled external API:

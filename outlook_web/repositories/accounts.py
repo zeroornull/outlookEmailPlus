@@ -746,6 +746,9 @@ def toggle_telegram_push(account_id: int, enabled: bool) -> bool:
     if not row:
         return False
 
+    source_type = "account"
+    source_key = _build_source_key(source_type, row["email"] or "")
+
     if enabled:
         already_enabled = bool(row["telegram_push_enabled"])
         if already_enabled:
@@ -755,9 +758,7 @@ def toggle_telegram_push(account_id: int, enabled: bool) -> bool:
             "UPDATE accounts SET telegram_push_enabled = 1, telegram_last_checked_at = ? WHERE id = ?",
             (now_utc, account_id),
         )
-        source_type = "account"
-        source_key = _build_source_key(source_type, row["email"] or "")
-        for channel in ("email", "telegram"):
+        for channel in ("email", "telegram", "webhook"):
             db.execute(
                 """
                 INSERT INTO notification_cursor_states (
@@ -773,6 +774,10 @@ def toggle_telegram_push(account_id: int, enabled: bool) -> bool:
             )
     else:
         db.execute("UPDATE accounts SET telegram_push_enabled = 0 WHERE id = ?", (account_id,))
+
+    from outlook_web.repositories.notification_outbox import cancel_source_deliveries
+
+    cancel_source_deliveries(source_type, source_key, commit=False)
 
     db.commit()
     return True

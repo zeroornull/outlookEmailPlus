@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+from collections import OrderedDict
+from concurrent.futures import Future
+from copy import deepcopy
+from dataclasses import dataclass
+import hashlib
+import json
+import math
+import threading
+import time
+
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -8,6 +18,7 @@ from outlook_web.errors import build_error_payload
 from outlook_web.repositories import settings as settings_repo
 from outlook_web.services.http import get_response_details
 from outlook_web.services.oauth_refresh import post_refresh_token
+from outlook_web.services.notification_transport import retry_after_seconds
 
 # Token 端点
 TOKEN_URL_TEMPLATE = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
@@ -17,6 +28,69 @@ GRAPH_MAIL_READ_SCOPES = ("Mail.Read", "Mail.ReadWrite")
 
 # Graph API 返回 401 时表示账号授权失效（与 token endpoint 失败不同）
 GRAPH_AUTH_EXPIRED_STATUS = 401
+
+GRAPH_TOKEN_CACHE_MAX_ENTRIES = 1024
+GRAPH_TOKEN_EXPIRY_MARGIN_SECONDS = 60.0
+GRAPH_TOKEN_DEFAULT_RETRY_SECONDS = 60.0
+
+
+@dataclass
+class _GraphTokenEntry:
+    result: Dict[str, Any]
+    expires_at: float
+
+
+_graph_token_cache: OrderedDict[str, _GraphTokenEntry] = OrderedDict()
+_graph_token_inflight: Dict[str, Future] = {}
+_graph_token_lock = threading.Lock()
+
+
+def _graph_token_key(client_id, refresh_token, proxy_url, client_secret) -> str:
+    credentials = json.dumps([client_id, refresh_token, proxy_url or "", client_secret or ""], ensure_ascii=False)
+    return hashlib.sha256(credentials.encode("utf-8")).hexdigest()
+
+
+def _prune_graph_token_cache(now: float) -> None:
+    for key, entry in list(_graph_token_cache.items()):
+        if entry.expires_at <= now:
+            del _graph_token_cache[key]
+    while len(_graph_token_cache) > GRAPH_TOKEN_CACHE_MAX_ENTRIES:
+        _, oldest = _graph_token_cache.popitem(last=False)
+        for alias, entry in list(_graph_token_cache.items()):
+            if entry is oldest:
+                del _graph_token_cache[alias]
+
+
+def clear_graph_token_cache() -> None:
+    """Clear cached tokens/cooldowns; in-flight requests cannot repopulate them."""
+    with _graph_token_lock:
+        _graph_token_cache.clear()
+        _graph_token_inflight.clear()
+
+
+def invalidate_graph_access_token(client_id: str, refresh_token: str, proxy_url: str = None) -> None:
+    """Invalidate a rejected access token and all of its rotated-token aliases."""
+    client_secret = settings_repo.get_oauth_client_secret_for_client(client_id)
+    key = _graph_token_key(client_id, refresh_token, proxy_url, client_secret)
+    with _graph_token_lock:
+        entry = _graph_token_cache.get(key)
+        if entry is not None:
+            for alias, candidate in list(_graph_token_cache.items()):
+                if candidate is entry:
+                    del _graph_token_cache[alias]
+        _graph_token_inflight.pop(key, None)
+
+
+def _graph_token_lifetime(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return 0.0
+    try:
+        lifetime = float(value)
+    except (ValueError, OverflowError):
+        return 0.0
+    if not math.isfinite(lifetime) or lifetime <= 0:
+        return 0.0
+    return max(0.0, lifetime - min(GRAPH_TOKEN_EXPIRY_MARGIN_SECONDS, lifetime * 0.1))
 
 
 def build_proxies(proxy_url: str) -> Optional[Dict[str, str]]:
@@ -33,7 +107,60 @@ def build_token_url(tenant: str | None = None) -> str:
 
 
 def get_access_token_graph_result(client_id: str, refresh_token: str, proxy_url: str = None) -> Dict[str, Any]:
-    """获取 Graph API access_token（包含错误详情）"""
+    """Get a token with bounded expiry, same-key single flight and rate cooldown."""
+    try:
+        client_secret = settings_repo.get_oauth_client_secret_for_client(client_id)
+        key = _graph_token_key(client_id, refresh_token, proxy_url, client_secret)
+    except Exception as exc:
+        return _graph_token_exception(exc)
+
+    with _graph_token_lock:
+        now = time.monotonic()
+        _prune_graph_token_cache(now)
+        entry = _graph_token_cache.get(key)
+        if entry is not None:
+            _graph_token_cache.move_to_end(key)
+            result = deepcopy(entry.result)
+            if not result.get("success"):
+                result["retry_after"] = max(0.0, entry.expires_at - now)
+            return result
+        future = _graph_token_inflight.get(key)
+        owner = future is None
+        if owner:
+            future = Future()
+            _graph_token_inflight[key] = future
+
+    if not owner:
+        return deepcopy(future.result())
+
+    started_at = time.monotonic()
+    try:
+        result = _refresh_graph_access_token(client_id, refresh_token, proxy_url, client_secret)
+        lifetime = _graph_token_lifetime(result.get("expires_in")) if result.get("success") else result.get("retry_after")
+        expires_at = started_at + lifetime if result.get("success") and lifetime else time.monotonic() + (lifetime or 0)
+        with _graph_token_lock:
+            # Explicit invalidation/clearing while the POST ran also discards its cache write.
+            if _graph_token_inflight.get(key) is future:
+                if expires_at > time.monotonic():
+                    entry = _GraphTokenEntry(deepcopy(result), expires_at)
+                    _graph_token_cache[key] = entry
+                    rotated = result.get("new_refresh_token")
+                    if result.get("success") and isinstance(rotated, str) and rotated.strip():
+                        alias = _graph_token_key(client_id, rotated, proxy_url, client_secret)
+                        _graph_token_cache[alias] = entry
+                    _prune_graph_token_cache(time.monotonic())
+                del _graph_token_inflight[key]
+        future.set_result(result)
+        return deepcopy(result)
+    except BaseException as exc:
+        with _graph_token_lock:
+            if _graph_token_inflight.get(key) is future:
+                del _graph_token_inflight[key]
+        future.set_exception(exc)
+        raise
+
+
+def _refresh_graph_access_token(client_id, refresh_token, proxy_url, client_secret) -> Dict[str, Any]:
     try:
         proxies = build_proxies(proxy_url)
         data = {
@@ -42,7 +169,7 @@ def get_access_token_graph_result(client_id: str, refresh_token: str, proxy_url:
             "refresh_token": refresh_token,
             "scope": DEFAULT_GRAPH_SCOPE,
         }
-        client_secret = settings_repo.get_oauth_client_secret_for_client(client_id)
+        # Use the same resolved secret as the cache key.
         if client_secret:
             data["client_secret"] = client_secret
         res = post_refresh_token(TOKEN_URL_GRAPH, data=data, timeout=30, proxies=proxies)
@@ -66,8 +193,12 @@ def get_access_token_graph_result(client_id: str, refresh_token: str, proxy_url:
                         details = get_response_details(res)
 
         if res.status_code != 200:
+            retry_after = retry_after_seconds(res.headers.get("Retry-After"))
+            if res.status_code == 429 and retry_after is None:
+                retry_after = GRAPH_TOKEN_DEFAULT_RETRY_SECONDS
             return {
                 "success": False,
+                "retry_after": retry_after,
                 "error": build_error_payload(
                     "GRAPH_TOKEN_FAILED",
                     "获取访问令牌失败",
@@ -82,6 +213,7 @@ def get_access_token_graph_result(client_id: str, refresh_token: str, proxy_url:
         if not isinstance(access_token, str) or not access_token.strip():
             return {
                 "success": False,
+                "retry_after": None,
                 "error": build_error_payload(
                     "GRAPH_TOKEN_MISSING",
                     "获取访问令牌失败",
@@ -99,18 +231,24 @@ def get_access_token_graph_result(client_id: str, refresh_token: str, proxy_url:
             "refresh_token": new_refresh_token,
             "new_refresh_token": new_refresh_token,
             "scope": payload.get("scope", ""),
+            "expires_in": payload.get("expires_in"),
         }
     except Exception as exc:
-        return {
-            "success": False,
-            "error": build_error_payload(
-                "GRAPH_TOKEN_EXCEPTION",
-                "获取访问令牌失败",
-                type(exc).__name__,
-                500,
-                str(exc),
-            ),
-        }
+        return _graph_token_exception(exc)
+
+
+def _graph_token_exception(exc: Exception) -> Dict[str, Any]:
+    return {
+        "success": False,
+        "retry_after": None,
+        "error": build_error_payload(
+            "GRAPH_TOKEN_EXCEPTION",
+            "获取访问令牌失败",
+            type(exc).__name__,
+            500,
+            str(exc),
+        ),
+    }
 
 
 def has_mail_read_permission(scope: Any) -> bool:
@@ -180,6 +318,8 @@ def get_emails_graph(
         res = requests.get(url, headers=headers, params=params, timeout=30, proxies=proxies)
 
         if res.status_code != 200:
+            if res.status_code == GRAPH_AUTH_EXPIRED_STATUS:
+                invalidate_graph_access_token(client_id, refresh_token, proxy_url)
             details = get_response_details(res)
             return {
                 "success": False,
@@ -236,6 +376,8 @@ def get_email_detail_graph(
         res = requests.get(url, headers=headers, params=params, timeout=30, proxies=proxies)
 
         if res.status_code != 200:
+            if res.status_code == GRAPH_AUTH_EXPIRED_STATUS:
+                invalidate_graph_access_token(client_id, refresh_token, proxy_url)
             return None
 
         return res.json()
@@ -264,6 +406,8 @@ def get_email_raw_graph(
         res = requests.get(url, headers=headers, timeout=30, proxies=proxies)
 
         if res.status_code != 200:
+            if res.status_code == GRAPH_AUTH_EXPIRED_STATUS:
+                invalidate_graph_access_token(client_id, refresh_token, proxy_url)
             return None
 
         res.encoding = res.encoding or "utf-8"
@@ -415,12 +559,16 @@ def delete_emails_graph(
                     if res.get("status") in [200, 204]:
                         success_count += 1
                     else:
+                        if res.get("status") == GRAPH_AUTH_EXPIRED_STATUS:
+                            invalidate_graph_access_token(client_id, refresh_token, proxy_url)
                         failed_count += 1
                         try:
                             errors.append(f"Msg ID: {batch[int(res['id'])]}, Status: {res.get('status')}")
                         except Exception:
                             errors.append(f"Status: {res.get('status')}")
             else:
+                if response.status_code == GRAPH_AUTH_EXPIRED_STATUS:
+                    invalidate_graph_access_token(client_id, refresh_token, proxy_url)
                 failed_count += len(batch)
                 errors.append(f"Batch request failed: {response.text}")
         except Exception as e:

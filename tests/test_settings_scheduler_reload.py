@@ -50,9 +50,11 @@ class SettingsSchedulerReloadTests(unittest.TestCase):
     def test_configure_scheduler_jobs_uses_unified_notification_dispatch_job(self):
         fake_scheduler = MagicMock(name="scheduler")
 
-        with patch("outlook_web.services.scheduler._configure_telegram_push_job") as configure_telegram, patch(
+        with patch(
             "outlook_web.services.scheduler._configure_email_notification_job"
-        ) as configure_email, patch("outlook_web.services.scheduler._configure_probe_poll_job"), patch(
+        ) as configure_email, patch(
+            "outlook_web.services.scheduler._configure_notification_delivery_job"
+        ) as configure_delivery, patch("outlook_web.services.scheduler._configure_probe_poll_job"), patch(
             "outlook_web.services.scheduler._configure_pool_maintenance_jobs"
         ):
             from outlook_web.services import scheduler as scheduler_service
@@ -60,4 +62,30 @@ class SettingsSchedulerReloadTests(unittest.TestCase):
             scheduler_service.configure_scheduler_jobs(fake_scheduler, self.app, lambda *_args, **_kwargs: None)
 
         configure_email.assert_called_once_with(fake_scheduler, self.app)
-        configure_telegram.assert_not_called()
+        configure_delivery.assert_called_once_with(fake_scheduler, self.app)
+
+    def test_delivery_runs_every_second_when_token_refresh_disabled(self):
+        from outlook_web.services import scheduler as scheduler_service
+        from outlook_web.services.notification_delivery import run_notification_delivery_job
+
+        fake_scheduler = MagicMock(name="scheduler")
+        values = {"enable_scheduled_refresh": "false", "telegram_poll_interval": "120"}
+        with patch.object(
+            scheduler_service.settings_repo, "get_setting", side_effect=lambda key, default="": values.get(key, default)
+        ), patch.object(scheduler_service, "_configure_probe_poll_job"), patch.object(
+            scheduler_service, "_configure_pool_maintenance_jobs"
+        ):
+            scheduler_service.configure_scheduler_jobs(fake_scheduler, self.app, lambda *_args: None)
+
+        jobs = {call.kwargs["id"]: call.kwargs for call in fake_scheduler.add_job.call_args_list}
+        for channel in ("email", "telegram", "webhook"):
+            delivery = jobs[f"notification_delivery_{channel}_job"]
+            self.assertIs(delivery["func"], run_notification_delivery_job)
+            self.assertEqual(delivery["args"], [self.app, channel])
+            self.assertEqual(delivery["seconds"], 1)
+            self.assertEqual(delivery["max_instances"], 1)
+            self.assertTrue(delivery["coalesce"])
+        self.assertEqual(jobs["email_notification_job"]["seconds"], 120)
+        self.assertNotIn("token_refresh", jobs)
+        self.assertNotIn("telegram_push_job", jobs)
+        fake_scheduler.remove_job.assert_any_call("telegram_push_job")

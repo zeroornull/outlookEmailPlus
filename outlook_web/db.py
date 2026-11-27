@@ -40,7 +40,8 @@ from outlook_web.security.crypto import (
 # v24：2026-07-01 临时邮箱接入邮箱池（temp_emails 新增池生命周期字段：pool_status/claimed_by/...，可被 claim-random 领取）
 # v25：ZER-537 — external_api_keys 新增 expires_at，支持 API Key 生命周期管理
 # v26：Telegram 单封邮件限时加密预览快照
-DB_SCHEMA_VERSION = 26
+# v27：共享加密通知载荷、持久同步进度和带租约的通知发件箱
+DB_SCHEMA_VERSION = 27
 DB_SCHEMA_VERSION_KEY = "db_schema_version"
 DB_SCHEMA_LAST_UPGRADE_TRACE_ID_KEY = "db_schema_last_upgrade_trace_id"
 DB_SCHEMA_LAST_UPGRADE_ERROR_KEY = "db_schema_last_upgrade_error"
@@ -810,24 +811,6 @@ def init_db(database_path: Optional[str] = None):
             ON telegram_preview_snapshots(expires_at)
             """)
 
-        # v5: Telegram 推送去重日志（BUG-00011 P2）
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS telegram_push_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                account_id INTEGER NOT NULL,
-                message_id TEXT NOT NULL,
-                pushed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
-                UNIQUE(account_id, message_id)
-            )
-            """)
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_telegram_push_log_account_id
-            ON telegram_push_log(account_id)
-            """)
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_telegram_push_log_pushed_at
-            ON telegram_push_log(pushed_at)
-            """)
 
         # v13: 统一通知游标表（V1.90 邮件通知增强）
         cursor.execute("""
@@ -866,6 +849,118 @@ def init_db(database_path: Optional[str] = None):
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_notification_delivery_logs_lookup
             ON notification_delivery_logs(channel, source_type, source_key, delivered_at)
+            """)
+
+        # v27: 旧 Telegram 去重键原样沿用共享 message_key，合并近期已发送记录后删除旧表。
+        legacy_push_log = cursor.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'telegram_push_log'"
+        ).fetchone()
+        if legacy_push_log:
+            for legacy in conn.execute(
+                """SELECT a.email, l.message_id, l.pushed_at FROM telegram_push_log l
+                    JOIN accounts a ON a.id = l.account_id
+                    WHERE julianday(l.pushed_at) >= julianday(?, 'unixepoch')""",
+                (time.time() - 14 * 86400,),
+            ):
+                cursor.execute(
+                    """INSERT INTO notification_delivery_logs
+                        (channel, source_type, source_key, message_id, status, error_code, error_message, delivered_at)
+                        VALUES ('telegram', 'account', ?, ?, 'sent', '', '', ?)
+                        ON CONFLICT(channel, source_type, source_key, message_id) DO UPDATE SET
+                        status = 'sent', error_code = '', error_message = '', delivered_at = excluded.delivered_at
+                        WHERE notification_delivery_logs.status != 'sent'""",
+                    (f"account:{str(legacy['email'] or '').strip().lower()}", legacy["message_id"], legacy["pushed_at"]),
+                )
+            cursor.execute("DROP TABLE telegram_push_log")
+
+        # v27: 一封邮件共享一个加密载荷，通道只保存投递引用。
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS notification_sync_states (
+                source_type TEXT NOT NULL,
+                source_key TEXT NOT NULL,
+                sync_cursor TEXT NOT NULL DEFAULT '',
+                next_fetch_at REAL NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT '',
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(source_type, source_key)
+            )
+            """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS notification_destination_cooldowns (
+                target TEXT PRIMARY KEY,
+                next_allowed_at REAL NOT NULL
+            )
+            """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_notification_destination_cooldown_expiry
+            ON notification_destination_cooldowns(next_allowed_at)
+            """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS notification_outbox_payloads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_type TEXT NOT NULL,
+                source_key TEXT NOT NULL,
+                message_key TEXT NOT NULL,
+                encrypted_payload TEXT NOT NULL,
+                payload_bytes INTEGER NOT NULL,
+                created_at REAL NOT NULL,
+                expires_at REAL NOT NULL,
+                UNIQUE(source_type, source_key, message_key)
+            )
+            """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_notification_outbox_payload_expiry
+            ON notification_outbox_payloads(expires_at)
+            """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS notification_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                payload_id INTEGER REFERENCES notification_outbox_payloads(id) ON DELETE SET NULL,
+                channel TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                source_key TEXT NOT NULL,
+                message_key TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at REAL NOT NULL,
+                lease_token TEXT,
+                leased_at REAL,
+                expires_at REAL NOT NULL,
+                error_code TEXT NOT NULL DEFAULT '',
+                error_message TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                UNIQUE(channel, source_type, source_key, message_key)
+            )
+            """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_notification_outbox_due
+            ON notification_outbox(status, next_attempt_at, id)
+            """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_notification_outbox_channel_due
+            ON notification_outbox(channel, status, next_attempt_at, id)
+            """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_notification_outbox_payload_refs
+            ON notification_outbox(payload_id, status)
+            """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_notification_outbox_retention
+            ON notification_outbox(status, updated_at)
+            """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_notification_outbox_expiry
+            ON notification_outbox(expires_at) WHERE status IN ('pending', 'processing')
+            """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_notification_delivery_logs_retention
+            ON notification_delivery_logs(julianday(delivered_at))
+            """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_notification_delivery_logs_non_slim_sent
+            ON notification_delivery_logs(id)
+            WHERE status = 'sent' AND (error_code != '' OR error_message != '')
             """)
 
         # v6: 对外 API 限流表 + 公网模式默认配置（PRD-00008 P1）

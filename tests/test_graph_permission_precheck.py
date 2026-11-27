@@ -40,6 +40,15 @@ def _make_error_response(status: int = 400):
 class TestGraphPermissionPrecheck(unittest.TestCase):
     """Graph API 权限预检测试"""
 
+    def setUp(self):
+        from outlook_web.services import graph
+
+        graph.clear_graph_token_cache()
+        self.addCleanup(graph.clear_graph_token_cache)
+        secret = patch.object(graph.settings_repo, "get_oauth_client_secret_for_client", return_value="")
+        secret.start()
+        self.addCleanup(secret.stop)
+
     # ------------------------------------------------------------------
     # has_mail_read_permission 工具函数测试
     # ------------------------------------------------------------------
@@ -142,6 +151,10 @@ class TestGraphPermissionPrecheck(unittest.TestCase):
 
 class TestGraphGrantedScopeRecovery(unittest.TestCase):
     def setUp(self):
+        from outlook_web.services.graph import clear_graph_token_cache
+
+        clear_graph_token_cache()
+        self.addCleanup(clear_graph_token_cache)
         secret = patch("outlook_web.services.graph.settings_repo.get_oauth_client_secret_for_client", return_value="secret")
         secret.start()
         self.addCleanup(secret.stop)
@@ -164,12 +177,14 @@ class TestGraphGrantedScopeRecovery(unittest.TestCase):
                                    (["90023"], "No applicable permissions found."),
                                    ([], "AADSTS90023: No applicable permissions found.")):
             with self.subTest(codes=codes, description=description):
+                graph.clear_graph_token_cache()
                 post.reset_mock()
                 post.side_effect = [self.rejection(codes=codes, description=description),
                                     _make_graph_token_response("mail-token", "Mail.Read", "rotated")]
                 result = graph.get_access_token_graph_result("cid", "rt", "http://proxy")
                 self.assertEqual(result, {"success": True, "access_token": "mail-token",
-                                          "refresh_token": "rotated", "new_refresh_token": "rotated", "scope": "Mail.Read"})
+                                          "refresh_token": "rotated", "new_refresh_token": "rotated", "scope": "Mail.Read",
+                                          "expires_in": 3599})
                 self.assertEqual(post.call_count, 2)
                 first, second = post.call_args_list
                 self.assertEqual(first.args, (graph.TOKEN_URL_GRAPH,))
@@ -195,6 +210,9 @@ class TestGraphGrantedScopeRecovery(unittest.TestCase):
                     self.rejection(description="AADSTS9002331: No applicable permissions found.", codes=[])]
         for response in failures:
             with self.subTest(payload=response.json.return_value, status=response.status_code):
+                from outlook_web.services.graph import clear_graph_token_cache
+
+                clear_graph_token_cache()
                 post.reset_mock()
                 post.side_effect = None
                 post.return_value = response

@@ -27,6 +27,7 @@ class WebhookPushServiceTests(unittest.TestCase):
         resp = Mock()
         resp.status_code = status_code
         resp.text = text
+        resp.headers = {}
         return resp
 
     def test_send_webhook_message_success_on_2xx(self):
@@ -136,6 +137,30 @@ class WebhookPushServiceTests(unittest.TestCase):
 
         headers = post_mock.call_args.kwargs.get("headers", {})
         self.assertEqual(headers.get("X-Webhook-Token"), "token-123")
+
+    def test_rate_limit_is_structured_and_never_immediately_retried(self):
+        from outlook_web.services import webhook_push
+        from outlook_web.services.notification_transport import NotificationTransportError
+
+        response = self._resp(429, "rate limited")
+        response.headers = {"Retry-After": "12"}
+        with patch.object(webhook_push.requests, "post", return_value=response) as post_mock:
+            with self.assertRaises(NotificationTransportError) as ctx:
+                webhook_push.send_webhook_message(url="https://example.com/hook", token="", text_body="hello", retry=3)
+
+        post_mock.assert_called_once()
+        self.assertIsInstance(ctx.exception, webhook_push.WebhookPushError)
+        self.assertEqual(ctx.exception.retry_after, 12.0)
+        self.assertEqual(ctx.exception.status, 429)
+        self.assertEqual(ctx.exception.attempts, 1)
+
+    def test_rate_limit_without_header_uses_default_cooldown(self):
+        from outlook_web.services import webhook_push
+
+        with patch.object(webhook_push.requests, "post", return_value=self._resp(429)):
+            with self.assertRaises(webhook_push.WebhookPushError) as ctx:
+                webhook_push.send_webhook_message(url="https://example.com/hook", token="", text_body="hello")
+        self.assertEqual(ctx.exception.retry_after, 60.0)
 
     def test_build_business_webhook_text_contains_minimum_fields(self):
         from outlook_web.services import webhook_push

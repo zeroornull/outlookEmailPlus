@@ -37,6 +37,8 @@ class OAuthClientCredentialTests(unittest.TestCase):
         self.app.teardown_appcontext(close_db)
         imap.clear_imap_token_cache()
         self.addCleanup(imap.clear_imap_token_cache)
+        graph.clear_graph_token_cache()
+        self.addCleanup(graph.clear_graph_token_cache)
 
     def _set_settings(self, client_id, secret):
         with closing(sqlite3.connect(self.database_path)) as db, db:
@@ -152,6 +154,7 @@ class OAuthClientCredentialTests(unittest.TestCase):
         for name, refresh, expected_url in calls:
             with self.subTest(refresh=name):
                 imap.clear_imap_token_cache()
+                graph.clear_graph_token_cache()
                 with patch.object(requests, "post", return_value=self._response()) as post:
                     result = refresh()
                 post.assert_called_once()
@@ -199,6 +202,8 @@ class OAuthRefreshGrantTests(unittest.TestCase):
     def setUp(self):
         imap.clear_imap_token_cache()
         self.addCleanup(imap.clear_imap_token_cache)
+        graph.clear_graph_token_cache()
+        self.addCleanup(graph.clear_graph_token_cache)
         secret = patch.object(settings_repo, "get_oauth_client_secret_for_client", return_value="server-secret")
         secret.start()
         self.addCleanup(secret.stop)

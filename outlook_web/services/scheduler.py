@@ -105,39 +105,15 @@ def _get_notification_dispatch_interval(app) -> int:
     return _get_telegram_interval(app)
 
 
-def _configure_telegram_push_job(scheduler, app) -> None:
-    """注册/更新旧版 Telegram 推送 Job。"""
-    from outlook_web.services.telegram_push import run_telegram_push_job
-
-    try:
-        scheduler.remove_job("telegram_push_job")
-    except Exception:
-        pass
-
-    interval = _get_telegram_interval(app)
-    scheduler.add_job(
-        func=run_telegram_push_job,
-        args=[app],
-        trigger="interval",
-        seconds=interval,
-        id="telegram_push_job",
-        name="Telegram 推送",
-        replace_existing=True,
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=interval,
-    )
-    print(f"✓ Telegram 推送 Job 已配置（轮询间隔：{interval} 秒）")
-
-
 def _configure_email_notification_job(scheduler, app) -> None:
     """注册/更新统一通知分发 Job。"""
     from outlook_web.services.notification_dispatch import run_notification_dispatch_job
 
-    try:
-        scheduler.remove_job("email_notification_job")
-    except Exception:
-        pass
+    for job_id in ("email_notification_job", "telegram_push_job"):
+        try:
+            scheduler.remove_job(job_id)
+        except Exception:
+            pass
 
     interval = _get_notification_dispatch_interval(app)
     scheduler.add_job(
@@ -153,6 +129,29 @@ def _configure_email_notification_job(scheduler, app) -> None:
         misfire_grace_time=interval,
     )
     print(f"✓ 统一通知分发 Job 已配置（轮询间隔：{interval} 秒）")
+
+
+def _configure_notification_delivery_job(scheduler, app) -> None:
+    """发送队列独立于邮箱同步和 Token 刷新周期运行。"""
+    from outlook_web.services.notification_delivery import run_notification_delivery_job
+
+    try:
+        scheduler.remove_job("notification_delivery_job")
+    except Exception:
+        pass
+    for channel in ("email", "telegram", "webhook"):
+        scheduler.add_job(
+            func=run_notification_delivery_job,
+            args=[app, channel],
+            trigger="interval",
+            seconds=1,
+            id=f"notification_delivery_{channel}_job",
+            name=f"通知队列发送 ({channel})",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=5,
+        )
 
 
 def _configure_probe_poll_job(scheduler, app) -> None:
@@ -290,6 +289,7 @@ def configure_scheduler_jobs(scheduler, app, test_refresh_token) -> None:
     )
 
     _configure_email_notification_job(scheduler, app)
+    _configure_notification_delivery_job(scheduler, app)
     _configure_probe_poll_job(scheduler, app)
     _configure_pool_maintenance_jobs(scheduler)
 
