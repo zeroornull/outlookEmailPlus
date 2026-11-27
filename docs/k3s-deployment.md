@@ -136,3 +136,17 @@ kubectl --context default -n dev get deployment outlook-email-plus -o jsonpath="
 - 发布方式：同一 strategic patch 更新镜像与环境变量；server dry-run、rollout、目标镜像及环境变量核对成功，公网健康检查 HTTP 200、`status=ok`。
 - 验证：预览、Telegram 及通知分发 105 项定向测试通过；线上临时单封快照免登录 HTTP 200、无效链接 HTTP 404，响应包含 no-store / no-referrer；320px 浏览器显示 HTML 正文，无横向溢出。验证快照已删除，未发送真实 Telegram 消息。
 - 预览仅用于配置生效后生成的新通知；持链可读取这一封邮件，7 天后失效。
+
+## 2026-11-27 通知共享取信与持久投递队列
+
+- 通知实现提交：`c27e6ccc5fcd5f96c3383157d9658fc486b1d444`；镜像构建提交：`05720cfc69e4fe0e8e903ecebd1b39e31f205a96`，分支 `fix/oauth-client-secret`。
+- Actions：[45996863316](https://github.com/zeroornull/outlookEmailPlus/actions/runs/45996863316)，SPA、Legacy、amd64 / arm64 构建与多架构合并全部成功。首次构建的全量 `pnpm rebuild` 报 `E2BIG`，改用仓库既有的 `pnpm rebuild esbuild` 后成功；冻结锁文件安装与 SPA 编译保持启用。
+- 镜像：`ghcr.io/zeroornull/outlook-email-plus@sha256:b3a8c8d26ae0a33b1124d06cf709d43b218d4d4f3cd6d7940eec6911dd2f3fa1`。
+- 上一镜像：`ghcr.io/zeroornull/outlook-email-plus@sha256:3f8e33129cbca011e8cf34f081dca27897fdd08a04696c3daa2b875b73e3c217`。
+- SQLite 在线备份：`/app/data/outlook_accounts.db.20261127T121616917232Z-f64d024c27d04b0dac929caeb7c29780.bak`，3280896 字节；位于原持久卷。
+- 目标仍为 context `default`、namespace `dev`、Deployment / container `outlook-email-plus`。更新策略改为 `Recreate`，保持单副本，避免新旧 Pod 同时调度或访问迁移中的 SQLite；切换过程中存在短暂停机。
+- server dry-run、备份、rollout 与固定 digest 核对通过；公网 `/healthz` 返回 HTTP 200、`status=ok`。
+- 只读验证：v26→v27 迁移记录为 `success`，所需表和索引齐全，旧 `telegram_push_log` 已移除；SQLite `quick_check=ok`，账号仍为 126 个，无升级错误与缺失正文引用。
+- 原 `SECRET_KEY`、容器环境变量、持久卷和通知配置保持不变，轮询间隔仍为 15 秒。运行实例为一个 Gunicorn master、一个 worker，新容器启动后该 worker 的调度心跳正常；检查的启动日志中无 Python traceback、SQLite 锁错误或迁移失败标记。
+- 已按 LF 规范化核对线上数据库、共享同步、投递器及队列存储四个关键模块与验证代码一致。上线后只读快照已观察到 10 条 Telegram 成功投递记录，待投递正文约 420 KB；未主动创建测试邮件或发送测试通知。
+- 上线前 211 项通知相关定向测试通过；工作流 YAML 解析与实际镜像构建通过。若需回退，先停止写入，再按上文流程评估恢复此备份与旧镜像，不能在运行中覆盖 SQLite 或仅回退镜像。
