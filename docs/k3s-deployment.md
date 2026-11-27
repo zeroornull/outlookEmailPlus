@@ -124,3 +124,15 @@ kubectl --context default -n dev get deployment outlook-email-plus -o jsonpath="
 线上已设置 `enable_scheduled_refresh=true`、`use_cron_schedule=false`、`refresh_interval_days=1`。现有任务每天北京时间 02:00 检查刷新，执行时读取数据库中的周期，无需为这项配置重启服务。
 
 刷新成功后保存 Microsoft 轮换返回的新 refresh token；每日刷新无法恢复已撤销或已过期的授权。此类账号需重新登录 Microsoft，在 Token 工具中换取 Token 后自动导入对应邮箱。
+
+## 2026-11-27 Telegram 查看邮件预览
+
+- 提交：`24f7fb772d24fa2da2e96abdd8136faee89a13cb`。
+- Actions：[45960932488](https://github.com/zeroornull/outlookEmailPlus/actions/runs/45960932488)，SPA 与 amd64 / arm64 构建及多架构合并成功。
+- 镜像：`ghcr.io/zeroornull/outlook-email-plus@sha256:3f8e33129cbca011e8cf34f081dca27897fdd08a04696c3daa2b875b73e3c217`。
+- 上一镜像：`ghcr.io/zeroornull/outlook-email-plus@sha256:e98bf33313e43b2191290d09aeedcdc2d7ee917759c1652c74a49f8766215017`。
+- SQLite 在线备份：`/app/data/outlook_accounts.db.20261127T075005547804Z-31bf4d0fe5784151872d3002a4481e50.bak`，3194880 字节。
+- Deployment 环境变量：`TELEGRAM_PUBLIC_URL=https://outlook-email-plus.173114.xyz`；`GUNICORN_ACCESS_LOGFILE=/dev/null`，避免签名预览 URL 写入访问日志，应用错误日志保留。
+- 发布方式：同一 strategic patch 更新镜像与环境变量；server dry-run、rollout、目标镜像及环境变量核对成功，公网健康检查 HTTP 200、`status=ok`。
+- 验证：预览、Telegram 及通知分发 105 项定向测试通过；线上临时单封快照免登录 HTTP 200、无效链接 HTTP 404，响应包含 no-store / no-referrer；320px 浏览器显示 HTML 正文，无横向溢出。验证快照已删除，未发送真实 Telegram 消息。
+- 预览仅用于配置生效后生成的新通知；持链可读取这一封邮件，7 天后失效。
