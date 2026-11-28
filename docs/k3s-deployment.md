@@ -162,3 +162,17 @@ kubectl --context default -n dev get deployment outlook-email-plus -o jsonpath="
 - server dry-run、rollout 和固定镜像 digest 核对通过；公网 `/healthz` 返回 HTTP 200、`status=ok`，前端页脚指向本次提交。
 - 上线前：7 项邮箱搜索回归测试和 `pnpm run tsc` 通过；临时 251 账号浏览器联调覆盖跨页搜索、清空与分页。
 - 线上：账号总数 126；从第 2 页选取现有账号，在「全部分组」下搜索得到对应账号，搜索接口返回 HTTP 200。标准与简洁模式均验证通过，切换视图保留关键词，清空后恢复首批 100 个账号及分页入口。
+
+## 2026-11-28 Outlook 授权维护与调度修复
+
+- 实现提交：`fe2850dac5732546afac163ce25d20eee1a8545d`；调度状态预览补修及最终构建提交：`7af8da5e1b3ad97319f6bf229452ec0d061748ea`。
+- Actions：[46120805482](https://github.com/zeroornull/outlookEmailPlus/actions/runs/46120805482)，前端、amd64、arm64 和多架构合并全部成功。
+- 镜像：`ghcr.io/zeroornull/outlook-email-plus@sha256:b3b313d0ef87894c9290c4c417716c1fa94f213ff9653dffbef39f06bb99b7fe`。
+- 上一镜像：`ghcr.io/zeroornull/outlook-email-plus@sha256:008ac753f0a5b3c8af42ab3a4d11a9a7d6221ca6b501b26bb2bf8c66c000ab1d`。
+- SQLite 在线备份：`/app/data/outlook_accounts.db.20261128T072338377191Z-92a999f21ec94abe978da3273ef3cb50.bak`，4423680 字节；保留在原持久卷。
+- context `default`、namespace `dev`、Deployment / container `outlook-email-plus`，维持单副本 `Recreate`。server dry-run、rollout、镜像摘要和公网 `/healthz` 验证通过，HTTP 200、`status=ok`。
+- 每日刷新按账号上次成功刷新日期判断到期；Graph / IMAP 换取 Token 后立即保存轮换凭据，拒绝迟到请求覆盖已更新凭据。定时及手动刷新将凭据、时间和成功日志一起提交，保存失败返回失败。
+- 上线前定向检查：后端三批 91 / 189 / 152 项均通过；状态预览最后补修后，`tests.test_refresh_persistence_schedule`、`tests.test_error_and_trace`、`tests.test_smoke_contract` 共 44 项通过。前端 24 项测试、`pnpm run tsc` 和修改的旧版 JavaScript 语法检查通过。
+- 线上只读快照：账号总数 126，符合刷新条件的 Outlook 账号 113；SQLite `quick_check=ok`。时区为 `Asia/Shanghai`，每日 02:00 配置及调度器启动日志正常，新 worker PID 8 的心跳已更新，检查时心跳年龄 11 秒。
+- `GET /api/scheduler/status` 已返回带时区的未来五次检查预览，`next_due=2026-11-29T02:00:00+08:00`；当前账号状态推算届时 113 个账号到期，后续成功刷新可改变这一数量。这是配置及账号到期日期的计算预览，不是对 worker 内部 `next_run_time` 的读取；下一次定时批次尚未执行。
+- 浏览器已确认概览及账号管理显示「授权有效」，说明仅代表 Token 刷新成功、未验证邮箱读取权限；页脚提交为 `7af8da5`。本次未主动批量刷新账号或发送通知。
