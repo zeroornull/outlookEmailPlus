@@ -6,6 +6,7 @@ All notable changes to OutlookMail Plus are documented in this file.
 
 ### 修复 / Bug Fixes
 
+- **邮箱页账号搜索与分页**：标准三栏和简洁模式统一使用服务端搜索与分页，修复「全部分组」只能搜索首批账号、遗漏邮箱的问题；指定分组内搜索保持分组范围，搜索或清空关键词时返回第一页。
 - **邮箱刷新兼容性**：通用 Token 刷新沿用原授权范围，避免 Graph `.default` 静态权限遗漏历史授权；Graph 遇到微软明确的无适用权限错误时尝试已有的 `Mail.Read` 授权。当微软明确拒绝公共客户端携带 secret 时，Graph、IMAP 和刷新校验仅重发一次不带 secret 的请求，保留机密客户端所需凭据及刷新 Token 的加密轮换。
 - **Fork OAuth Web 应用凭据修复**：服务器按精确 Client ID 解析 `OAUTH_CLIENT_ID` / `OAUTH_CLIENT_SECRET`，用于授权码交换、账号保存前验证及后续 Graph / IMAP refresh token 刷新，修复 Web 回调要求客户端密码却未提交的问题。secret 不回传浏览器，Public Client 仍可留空，账号范围保持个人 Microsoft 账号（`tenant=consumers`）。
 - **Token 工具指引与保存 Scope**：区分 Azure Web 与 Mobile and desktop applications 平台配置；新前端写入账号时传递授权 Scope，避免保存验证使用错误的 Scope。

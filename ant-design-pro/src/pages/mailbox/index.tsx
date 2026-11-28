@@ -23,6 +23,7 @@ import {
   Input,
   List,
   Menu,
+  Pagination,
   Popconfirm,
   Segmented,
   Select,
@@ -86,6 +87,7 @@ import {
 
 
 const PAGE_SIZE = 20;
+const ACCOUNT_PAGE_SIZE = 100;
 
 type ReadFilter = 'all' | 'unread' | 'read';
 
@@ -146,7 +148,12 @@ const MailboxPage: React.FC = () => {
     loadViewMode(),
   );
   const [layoutResetToken, setLayoutResetToken] = useState(0);
-  const [groupId, setGroupId] = useState<number | undefined>(query.group);
+  const [{ groupId, page: accountPage, search: accountSearch }, setAccountQuery] =
+    useState<{ groupId?: number; page: number; search: string }>({
+      groupId: query.group,
+      page: 1,
+      search: '',
+    });
   const [selectedEmail, setSelectedEmail] = useState<string | undefined>(
     query.account,
   );
@@ -184,7 +191,8 @@ const MailboxPage: React.FC = () => {
     maxCount: pollMaxCount,
     acceptSettings: acceptPollSettings,
   } = usePollingSettingsDraft(getPollSettings(), loadPollSettingsWithFlag);
-  const [compactSearch, setCompactSearch] = useState('');
+  const [accountSearchInput, setAccountSearchInput] = useState('');
+  const accountSearchTimer = useRef<number | undefined>(undefined);
   const [compactSelected, setCompactSelected] = useState<number[]>([]);
   const [pullingEmails, setPullingEmails] = useState<Record<string, boolean>>(
     {},
@@ -198,6 +206,28 @@ const MailboxPage: React.FC = () => {
     };
   }, []);
 
+  const commitAccountSearch = useCallback((value: string) => {
+    clearTimeout(accountSearchTimer.current);
+    const search = value.trim();
+    setAccountQuery((current) =>
+      current.search === search ? current : { ...current, search, page: 1 },
+    );
+  }, []);
+
+  useEffect(() => {
+    accountSearchTimer.current = window.setTimeout(
+      () => commitAccountSearch(accountSearchInput),
+      300,
+    );
+    return () => clearTimeout(accountSearchTimer.current);
+  }, [accountSearchInput, commitAccountSearch]);
+
+  const onAccountSearchChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const value = event.target.value;
+    setAccountSearchInput(value);
+    if (!value) commitAccountSearch('');
+  };
+
   const groupsQuery = useQuery({
     queryKey: ['mailbox-groups'],
     queryFn: fetchGroups,
@@ -206,12 +236,13 @@ const MailboxPage: React.FC = () => {
   });
 
   const accountsQuery = useQuery({
-    queryKey: ['mailbox-accounts', groupId],
+    queryKey: ['mailbox-accounts', groupId, accountPage, accountSearch],
     queryFn: () =>
       fetchAccounts({
-        page: 1,
-        page_size: 200,
+        page: accountPage,
+        page_size: ACCOUNT_PAGE_SIZE,
         group_id: groupId,
+        search: accountSearch || undefined,
         sort_by: 'refresh_time',
         sort_order: 'asc',
       }),
@@ -232,15 +263,6 @@ const MailboxPage: React.FC = () => {
     [accountsQuery.data],
   );
 
-  const filteredCompactAccounts = useMemo(() => {
-    const q = compactSearch.trim().toLowerCase();
-    if (!q) return accounts;
-    return accounts.filter((a) => {
-      const hay =
-        `${a.email || ''} ${a.remark || ''} ${a.group_name || ''}`.toLowerCase();
-      return hay.includes(q);
-    });
-  }, [accounts, compactSearch]);
 
   useEffect(() => {
     return subscribePoll((snaps) => {
@@ -252,7 +274,13 @@ const MailboxPage: React.FC = () => {
   useEffect(() => {
     if (query.account) setSelectedEmail(query.account);
     if (query.folder) setFolder(query.folder);
-    if (query.group) setGroupId(query.group);
+    if (query.group) {
+      setAccountQuery((current) =>
+        current.groupId === query.group
+          ? current
+          : { ...current, groupId: query.group, page: 1 },
+      );
+    }
   }, [query.account, query.folder, query.group]);
 
   useEffect(() => {
@@ -440,7 +468,7 @@ const MailboxPage: React.FC = () => {
   const onGroupChange = (gid?: number) => {
     listRequestIdRef.current += 1;
     detailRequestIdRef.current += 1;
-    setGroupId(gid);
+    setAccountQuery((current) => ({ ...current, groupId: gid, page: 1 }));
     setSelectedEmail(undefined);
     setEmails([]);
     setHasMore(false);
@@ -814,6 +842,26 @@ const MailboxPage: React.FC = () => {
     );
   };
 
+  const accountTotal = accountsQuery.data?.pagination?.total_count || 0;
+  const accountEmptyDescription = accountSearch
+    ? '未找到匹配账号'
+    : '当前分组暂无账号';
+  const accountPagination = (
+    <Pagination
+      size="small"
+      current={accountPage}
+      pageSize={ACCOUNT_PAGE_SIZE}
+      total={accountTotal}
+      showSizeChanger={false}
+      hideOnSinglePage
+      onChange={(page) => {
+        setAccountQuery((current) => ({ ...current, page }));
+        setCompactSelected([]);
+      }}
+      style={{ padding: 8 }}
+    />
+  );
+
   // ── 左栏：分组 ──
   const groupsPane = (
     <Spin spinning={groupsQuery.isLoading}>
@@ -838,22 +886,21 @@ const MailboxPage: React.FC = () => {
           size="small"
           allowClear
           placeholder="筛选账号"
-          onSearch={setCompactSearch}
-          onChange={(e) => {
-            if (!e.target.value) setCompactSearch('');
-          }}
+          value={accountSearchInput}
+          onSearch={commitAccountSearch}
+          onChange={onAccountSearchChange}
         />
       </div>
-      <Spin spinning={accountsQuery.isLoading}>
-        {filteredCompactAccounts.length === 0 ? (
+      <Spin spinning={accountsQuery.isFetching}>
+        {accounts.length === 0 ? (
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}
-            description="当前分组暂无账号"
+            description={accountEmptyDescription}
             style={{ margin: '24px 0' }}
           />
         ) : (
           <div style={{ padding: '0 4px 4px' }}>
-            {filteredCompactAccounts.map((account: AccountItem) => {
+            {accounts.map((account: AccountItem) => {
               const active = selectedEmail === account.email;
               const poll = isPolling(account.email);
               const snap = pollSnapMap.get(account.email);
@@ -967,6 +1014,7 @@ const MailboxPage: React.FC = () => {
           </div>
         )}
       </Spin>
+      {accountPagination}
     </div>
   );
 
@@ -1438,10 +1486,9 @@ const MailboxPage: React.FC = () => {
           allowClear
           placeholder="搜索账号"
           style={{ width: 220, marginLeft: 'auto' }}
-          onSearch={setCompactSearch}
-          onChange={(e) => {
-            if (!e.target.value) setCompactSearch('');
-          }}
+          value={accountSearchInput}
+          onSearch={commitAccountSearch}
+          onChange={onAccountSearchChange}
         />
       </Space>
 
@@ -1451,7 +1498,7 @@ const MailboxPage: React.FC = () => {
           <Space>
             <span>简洁账号列表</span>
             <Typography.Text type="secondary">
-              {filteredCompactAccounts.length} 个账号
+              {accountTotal} 个账号
               {compactSelected.length
                 ? ` · 已选 ${compactSelected.length}`
                 : ''}
@@ -1479,13 +1526,13 @@ const MailboxPage: React.FC = () => {
         }
         styles={{ body: { padding: 0 } }}
       >
-        <Spin spinning={accountsQuery.isLoading}>
-          {filteredCompactAccounts.length === 0 ? (
-            <Empty style={{ margin: 48 }} description="当前分组暂无账号" />
+        <Spin spinning={accountsQuery.isFetching}>
+          {accounts.length === 0 ? (
+            <Empty style={{ margin: 48 }} description={accountEmptyDescription} />
           ) : (
             <Table<AccountItem>
               size="small"
-              dataSource={filteredCompactAccounts}
+              dataSource={accounts}
               columns={compactColumns}
               rowKey={(a) => a.id}
               pagination={false}
@@ -1498,6 +1545,7 @@ const MailboxPage: React.FC = () => {
             />
           )}
         </Spin>
+        {accountPagination}
       </ProCard>
     </Space>
   );
