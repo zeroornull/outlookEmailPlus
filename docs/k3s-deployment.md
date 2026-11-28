@@ -150,3 +150,15 @@ kubectl --context default -n dev get deployment outlook-email-plus -o jsonpath="
 - 原 `SECRET_KEY`、容器环境变量、持久卷和通知配置保持不变，轮询间隔仍为 15 秒。运行实例为一个 Gunicorn master、一个 worker，新容器启动后该 worker 的调度心跳正常；检查的启动日志中无 Python traceback、SQLite 锁错误或迁移失败标记。
 - 已按 LF 规范化核对线上数据库、共享同步、投递器及队列存储四个关键模块与验证代码一致。上线后只读快照已观察到 10 条 Telegram 成功投递记录，待投递正文约 420 KB；未主动创建测试邮件或发送测试通知。
 - 上线前 211 项通知相关定向测试通过；工作流 YAML 解析与实际镜像构建通过。若需回退，先停止写入，再按上文流程评估恢复此备份与旧镜像，不能在运行中覆盖 SQLite 或仅回退镜像。
+
+## 2026-11-28 邮箱账号全量搜索与分页
+
+- 提交：`d2c43145aac51dac5885f8a0f8e1a0e519fb42b5`，分支 `fix/oauth-client-secret`。
+- Actions：[46115045461](https://github.com/zeroornull/outlookEmailPlus/actions/runs/46115045461)，SPA、amd64 / arm64 镜像构建与多架构合并全部成功。
+- 镜像：`ghcr.io/zeroornull/outlook-email-plus@sha256:008ac753f0a5b3c8af42ab3a4d11a9a7d6221ca6b501b26bb2bf8c66c000ab1d`。
+- 上一镜像：`ghcr.io/zeroornull/outlook-email-plus@sha256:b3a8c8d26ae0a33b1124d06cf709d43b218d4d4f3cd6d7940eec6911dd2f3fa1`。
+- SQLite 在线备份：`/app/data/outlook_accounts.db.20261128T060827546572Z-c3d28041bd6749cf8eae99d872dc3c98.bak`，4182016 字节；位于原持久卷。
+- 目标：context `default`、namespace `dev`、Deployment / container `outlook-email-plus`；保持单副本 `Recreate` 策略。
+- server dry-run、rollout 和固定镜像 digest 核对通过；公网 `/healthz` 返回 HTTP 200、`status=ok`，前端页脚指向本次提交。
+- 上线前：7 项邮箱搜索回归测试和 `pnpm run tsc` 通过；临时 251 账号浏览器联调覆盖跨页搜索、清空与分页。
+- 线上：账号总数 126；从第 2 页选取现有账号，在「全部分组」下搜索得到对应账号，搜索接口返回 HTTP 200。标准与简洁模式均验证通过，切换视图保留关键词，清空后恢复首批 100 个账号及分页入口。
