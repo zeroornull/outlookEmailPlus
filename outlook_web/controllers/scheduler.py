@@ -6,11 +6,17 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from flask import jsonify
+from apscheduler.triggers.cron import CronTrigger
 
 from outlook_web import config
 from outlook_web.db import create_sqlite_connection
 from outlook_web.repositories import settings as settings_repo
 from outlook_web.security.auth import login_required
+from outlook_web.services.refresh import (
+    REFRESHABLE_OUTLOOK_ACCOUNT_SELECT,
+    _account_refresh_due_at,
+    get_refresh_schedule_timezone,
+)
 from outlook_web.services.scheduler import REFRESH_LOCK_NAME
 
 
@@ -99,37 +105,43 @@ def api_get_scheduler_status() -> Any:
         future_runs = []
         next_due = None
         if enable_scheduled:
+            schedule_timezone = get_refresh_schedule_timezone()
+            now = utcnow().replace(tzinfo=timezone.utc).astimezone(schedule_timezone)
+            next_check_from = now + timedelta(microseconds=1)
+            trigger = CronTrigger(hour=2, minute=0, timezone=schedule_timezone)
             if use_cron:
                 try:
                     from croniter import croniter
 
-                    base_time = datetime.now()
-                    it = croniter(refresh_cron, base_time)
-                    for _ in range(5):
-                        future_runs.append(it.get_next(datetime).isoformat())
+                    croniter(refresh_cron, now)
+                    minute, hour, day, month, day_of_week = refresh_cron.split()
+                    trigger = CronTrigger(
+                        minute=minute, hour=hour, day=day, month=month,
+                        day_of_week=day_of_week, timezone=schedule_timezone,
+                    )
                 except Exception:
-                    future_runs = []
-            else:
-                # 按天数策略：基于最近一次已完成的 scheduled/scheduled_manual 计算 next_due
-                row = conn.execute("""
-                    SELECT finished_at
-                    FROM refresh_runs
-                    WHERE trigger_source IN ('scheduled', 'scheduled_manual')
-                      AND status IN ('completed', 'failed')
-                      AND finished_at IS NOT NULL
-                    ORDER BY finished_at DESC
-                    LIMIT 1
-                """).fetchone()
-                last_finished_at = row["finished_at"] if row else None
-                try:
-                    last_time = datetime.fromisoformat(last_finished_at) if last_finished_at else None
-                except Exception:
-                    last_time = None
-
-                base = last_time if last_time else utcnow()
-                next_due_dt = base + timedelta(days=refresh_interval_days)
-                next_due = next_due_dt.isoformat()
-                future_runs.append(next_due_dt.isoformat())
+                    pass  # Match the worker's fallback to daily 02:00.
+            previous = None
+            for _ in range(5):
+                following = trigger.get_next_fire_time(previous, next_check_from)
+                if following is None:
+                    break
+                future_runs.append(following.isoformat())
+                previous = following
+                next_check_from = following + timedelta(microseconds=1)
+            if not use_cron:
+                accounts = conn.execute(REFRESHABLE_OUTLOOK_ACCOUNT_SELECT).fetchall()
+                earliest_due = None
+                for account in accounts:
+                    due_at = _account_refresh_due_at(account, refresh_interval_days, schedule_timezone)
+                    if due_at is None:
+                        earliest_due = now
+                        break
+                    if earliest_due is None or due_at < earliest_due:
+                        earliest_due = due_at
+                if earliest_due is not None:
+                    next_due_dt = trigger.get_next_fire_time(None, max(now + timedelta(microseconds=1), earliest_due))
+                    next_due = next_due_dt.isoformat() if next_due_dt else None
 
         return jsonify(
             {

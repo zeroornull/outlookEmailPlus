@@ -348,3 +348,75 @@ class RefreshPersistenceScheduleTests(unittest.TestCase):
         self.assertEqual(events[-1]["type"], "skipped")
         self.assertEqual(events[-1]["next_due"], "2026-12-01T02:00:00+00:00")
         self.assertEqual((self.latest_run()["total"], self.latest_run()["status"]), (0, "skipped"))
+
+    def scheduler_status(self, now):
+        from outlook_web.controllers import scheduler as controller
+
+        with self.app.test_request_context("/api/scheduler/status"):
+            with patch.object(controller, "utcnow", return_value=now):
+                return controller.api_get_scheduler_status.__wrapped__().get_json()
+
+    def test_status_yesterday_batch_completion_does_not_postpone_today_check(self):
+        self.add_account(last_refresh_at="2026-11-27 02:11:00")
+        self.conn.execute("""INSERT INTO refresh_runs
+                             (id, trigger_source, status, total, success_count, failed_count, finished_at)
+                             VALUES ('previous', 'scheduled', 'completed', 1, 1, 0, '2026-11-27 02:11:00')""")
+        self.conn.commit()
+        result = self.scheduler_status(datetime(2026, 11, 28, 1))
+        self.assertEqual(result["scheduler"]["next_due"], "2026-11-28T02:00:00+00:00")
+        self.assertEqual(result["scheduler"]["future_runs"], [
+            f"2026-{day}T02:00:00+00:00"
+            for day in ("11-28", "11-29", "11-30", "12-01", "12-02")
+        ])
+        self.assertEqual(result["refresh"]["last_scheduled"]["finished_at"], "2026-11-27 02:11:00")
+        overdue = self.scheduler_status(datetime(2026, 11, 28, 3))["scheduler"]
+        self.assertEqual(overdue["next_due"], "2026-11-29T02:00:00+00:00")
+
+    def test_status_uses_earliest_account_calendar_due_date_and_explicit_timezone(self):
+        self.add_account("later", last_refresh_at="2026-11-27 18:11:00")
+        self.add_account("earlier", last_refresh_at="2026-11-25 18:11:00")
+        self.conn.execute("UPDATE settings SET value = '3' WHERE key = 'refresh_interval_days'")
+        self.conn.commit()
+        local_zone = timezone(timedelta(hours=8))
+        with patch.object(self.scheduler, "_scheduler_instance", SimpleNamespace(timezone=local_zone)):
+            result = self.scheduler_status(datetime(2026, 11, 27, 17))["scheduler"]
+        self.assertEqual(result["future_runs"][0], "2026-11-28T02:00:00+08:00")
+        self.assertEqual(result["next_due"], "2026-11-29T02:00:00+08:00")
+
+    def test_status_disabled_and_no_eligible_accounts(self):
+        self.add_account("inactive", status="inactive")
+        self.add_account("imap", account_type="imap")
+        self.add_account("pool", provider="cloudflare_temp_mail")
+        result = self.scheduler_status(datetime(2026, 11, 28, 1))["scheduler"]
+        self.assertIsNone(result["next_due"])
+        self.assertEqual(len(result["future_runs"]), 5)
+        self.add_account("eligible")
+        self.assertEqual(self.scheduler_status(datetime(2026, 11, 28, 1))["scheduler"]["next_due"],
+                         "2026-11-28T02:00:00+00:00")
+        self.conn.execute("UPDATE settings SET value = 'false' WHERE key = 'enable_scheduled_refresh'")
+        self.conn.commit()
+        result = self.scheduler_status(datetime(2026, 11, 28, 1))["scheduler"]
+        self.assertEqual(result["future_runs"], [])
+        self.assertIsNone(result["next_due"])
+
+    def test_status_cron_preview_uses_worker_timezone_and_weekday_semantics(self):
+        self.conn.execute("UPDATE settings SET value = 'true' WHERE key = 'use_cron_schedule'")
+        self.conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('refresh_cron', '15 4 * * 0')")
+        self.conn.commit()
+        local_zone = timezone(timedelta(hours=8))
+        with patch.object(self.scheduler, "_scheduler_instance", SimpleNamespace(timezone=local_zone)):
+            result = self.scheduler_status(datetime(2026, 11, 27, 17))["scheduler"]
+        self.assertEqual(result["future_runs"], [
+            f"2026-{day}T04:15:00+08:00"
+            for day in ("11-30", "12-07", "12-14", "12-21", "12-28")
+        ])
+        self.assertIsNone(result["next_due"])
+
+    def test_status_invalid_cron_previews_worker_daily_fallback(self):
+        self.conn.execute("UPDATE settings SET value = 'true' WHERE key = 'use_cron_schedule'")
+        self.conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('refresh_cron', 'invalid')")
+        self.conn.commit()
+        result = self.scheduler_status(datetime(2026, 11, 28, 1))["scheduler"]
+        self.assertEqual(result["future_runs"][0], "2026-11-28T02:00:00+00:00")
+        self.assertEqual(len(result["future_runs"]), 5)
+        self.assertIsNone(result["next_due"])
