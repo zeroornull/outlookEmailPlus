@@ -53,8 +53,23 @@ export function accountStatusLabel(status?: string | null): string {
   return mapLabel(ACCOUNT_STATUS, status);
 }
 
-export function healthStatusLabel(health?: string | null): string {
+type HealthAccount = { account_type?: string; provider?: string };
+
+function isOutlookAccount(account?: HealthAccount): boolean {
+  return !!account &&
+    String(account.account_type || 'outlook').toLowerCase() !== 'imap' &&
+    String(account.provider || 'outlook').toLowerCase() === 'outlook';
+}
+
+export function healthStatusHelp(account?: HealthAccount): string | undefined {
+  return isOutlookAccount(account)
+    ? 'Token 刷新成功仅表示授权有效，不代表已验证邮箱读取权限。'
+    : undefined;
+}
+
+export function healthStatusLabel(health?: string | null, account?: HealthAccount): string {
   const key = String(health || '').toLowerCase();
+  if (key === 'active' && isOutlookAccount(account)) return '授权有效';
   return HEALTH_STATUS[key] || accountStatusLabel(health);
 }
 

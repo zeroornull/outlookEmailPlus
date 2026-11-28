@@ -356,47 +356,57 @@ def update_preferred_verification_channel(account_id: int, channel: Optional[str
     return cursor.rowcount > 0
 
 
-def _decrypt_refresh_token_or_raw(value: Any) -> str:
-    """安全解密 refresh_token，解密失败时返回原文（兼容历史明文存量数据）。"""
-    if not value:
-        return ""
+class TokenPersistenceError(RuntimeError):
+    """A refresh result could not be safely applied to the stored credentials."""
+
+
+def persist_token_refresh(
+    account_id: int,
+    client_id: str,
+    previous_refresh_token: str,
+    new_refresh_token: str | None = None,
+    *,
+    connection=None,
+) -> str:
+    """Persist rotation and refresh time together; supplied connections own the transaction."""
+    db = connection
     try:
-        return str(decrypt_data(value) or "")
-    except Exception:
-        return str(value or "")
-
-
-def update_refresh_token_if_changed(account_id: int, new_refresh_token: str) -> bool:
-    """当 refresh_token 发生变化时更新数据库（统一 token 持久化入口）。"""
-    token = str(new_refresh_token or "").strip()
-    if not token:
-        return False
-
-    db = get_db()
-    row = db.execute(
-        "SELECT refresh_token FROM accounts WHERE id = ?",
-        (account_id,),
-    ).fetchone()
-    if not row:
-        return False
-
-    current_token = _decrypt_refresh_token_or_raw(row["refresh_token"])
-    if token == current_token:
-        return False
-
-    try:
-        db.execute(
+        if db is None:
+            db = get_db()
+        row = db.execute(
+            "SELECT client_id, refresh_token FROM accounts WHERE id = ?",
+            (account_id,),
+        ).fetchone()
+        if row is None or row["client_id"] != client_id:
+            raise TokenPersistenceError("Token persistence failed: account credentials changed")
+        stored_token = row["refresh_token"]
+        current_token = decrypt_data(stored_token) if stored_token else ""
+        rotated_token = new_refresh_token if isinstance(new_refresh_token, str) and new_refresh_token.strip() else None
+        if current_token != previous_refresh_token and (rotated_token is None or current_token != rotated_token):
+            raise TokenPersistenceError("Token persistence failed: account credentials changed")
+        effective_token = rotated_token or current_token
+        if not effective_token:
+            raise TokenPersistenceError("Token persistence failed: refresh token missing")
+        encrypted_token = encrypt_data(effective_token) if effective_token != current_token else stored_token
+        cursor = db.execute(
             """
             UPDATE accounts
-            SET refresh_token = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
+            SET refresh_token = ?, last_refresh_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND client_id = ? AND refresh_token IS ?
             """,
-            (encrypt_data(token), account_id),
+            (encrypted_token, account_id, client_id, stored_token),
         )
-        db.commit()
-        return True
-    except Exception:
-        return False
+        if cursor.rowcount != 1:
+            raise TokenPersistenceError("Token persistence failed: account credentials changed")
+        if connection is None:
+            db.commit()
+        return effective_token
+    except Exception as exc:
+        if connection is None and db is not None:
+            db.rollback()
+        if isinstance(exc, TokenPersistenceError):
+            raise
+        raise TokenPersistenceError("Token persistence failed: unable to save refresh result") from None
 
 
 def touch_last_refresh_at(account_id: int) -> bool:

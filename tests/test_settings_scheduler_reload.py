@@ -1,3 +1,4 @@
+from datetime import timezone
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -49,6 +50,7 @@ class SettingsSchedulerReloadTests(unittest.TestCase):
 
     def test_configure_scheduler_jobs_uses_unified_notification_dispatch_job(self):
         fake_scheduler = MagicMock(name="scheduler")
+        fake_scheduler.timezone = timezone.utc
 
         with patch(
             "outlook_web.services.scheduler._configure_email_notification_job"

@@ -533,7 +533,9 @@ def list_messages_for_external(
         skip=skip,
         top=top,
         proxy_url=proxy_url,
+        account_id=int(account["id"]),
     )
+    account["refresh_token"] = (accounts_repo.get_account_by_id(int(account["id"])) or {}).get("refresh_token", account.get("refresh_token", ""))
     if graph_result.get("success"):
         method_label = "Graph API"
         emails = [_build_message_summary(email_addr, e, method=method_label) for e in (graph_result.get("emails") or [])]
@@ -553,7 +555,9 @@ def list_messages_for_external(
         skip,
         top,
         IMAP_SERVER_NEW,
+        account_id=int(account["id"]),
     )
+    account["refresh_token"] = (accounts_repo.get_account_by_id(int(account["id"])) or {}).get("refresh_token", account.get("refresh_token", ""))
     if imap_new_result.get("success"):
         method_label = "IMAP (New)"
         emails = [_build_message_summary(email_addr, e, method=method_label) for e in (imap_new_result.get("emails") or [])]
@@ -567,7 +571,9 @@ def list_messages_for_external(
         skip,
         top,
         IMAP_SERVER_OLD,
+        account_id=int(account["id"]),
     )
+    account["refresh_token"] = (accounts_repo.get_account_by_id(int(account["id"])) or {}).get("refresh_token", account.get("refresh_token", ""))
     if imap_old_result.get("success"):
         method_label = "IMAP (Old)"
         emails = [_build_message_summary(email_addr, e, method=method_label) for e in (imap_old_result.get("emails") or [])]
@@ -720,7 +726,9 @@ def get_message_detail_for_external(  # noqa: C901
         account.get("refresh_token") or "",
         message_id,
         proxy_url,
+        account_id=int(account["id"]),
     )
+    account["refresh_token"] = (accounts_repo.get_account_by_id(int(account["id"])) or {}).get("refresh_token", account.get("refresh_token", ""))
     method_label = "Graph API"
     graph_raw_content = None
     if detail:
@@ -729,7 +737,9 @@ def get_message_detail_for_external(  # noqa: C901
             account.get("refresh_token") or "",
             message_id,
             proxy_url,
+            account_id=int(account["id"]),
         )
+        account["refresh_token"] = (accounts_repo.get_account_by_id(int(account["id"])) or {}).get("refresh_token", account.get("refresh_token", ""))
     if not detail:
         detail = imap_service.get_email_detail_imap_with_server(
             email_addr,
@@ -738,7 +748,9 @@ def get_message_detail_for_external(  # noqa: C901
             message_id,
             folder,
             IMAP_SERVER_NEW,
+            account_id=int(account["id"]),
         )
+        account["refresh_token"] = (accounts_repo.get_account_by_id(int(account["id"])) or {}).get("refresh_token", account.get("refresh_token", ""))
         method_label = "IMAP (New)"
 
     if not detail:
@@ -749,7 +761,9 @@ def get_message_detail_for_external(  # noqa: C901
             message_id,
             folder,
             IMAP_SERVER_OLD,
+            account_id=int(account["id"]),
         )
+        account["refresh_token"] = (accounts_repo.get_account_by_id(int(account["id"])) or {}).get("refresh_token", account.get("refresh_token", ""))
         method_label = "IMAP (Old)"
 
     if not detail:
@@ -968,13 +982,7 @@ def _extract_verification_with_memory_for_outlook(  # noqa: C901
             },
         )
 
-    if result.get("new_refresh_token"):
-        try:
-            new_token = str(result.get("new_refresh_token") or "").strip()
-            if new_token and accounts_repo.update_refresh_token_if_changed(int(account["id"]), new_token):
-                account["refresh_token"] = new_token
-        except Exception:
-            pass
+
 
     shaped = _shape_verification_result_by_expected_field(result.get("data") or {}, expected_field)
     shaped["_log_channel"] = (

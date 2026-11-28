@@ -335,7 +335,7 @@
                     </div>
                     <div class="account-card-bottom">
                         <div class="account-meta">
-                            <span class="badge ${healthBadgeClass}">${escapeHtml(formatAccountHealthLabel(acc))}</span>
+                            <span class="badge ${healthBadgeClass}" title="${escapeHtml(formatAccountHealthHelp(acc))}">${escapeHtml(formatAccountHealthLabel(acc))}</span>
                             <span class="account-api-tag">${acc.method || defaultMethodLabel}</span>
                             <span>🕐 ${formatRelativeTime(acc.last_refresh_at)}</span>
                             ${isFailed ? `<button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); showRefreshError(${acc.id}, '${escapeJs(acc.last_refresh_error || '未知错误')}', '${escapeJs(acc.email)}', '${escapeJs(acc.account_type || 'outlook')}', '${escapeJs(acc.provider || 'outlook')}')" style="padding:1px 6px;font-size:0.65rem;">${escapeHtml(translateAppTextLocal('查看错误'))}</button>` : ''}

@@ -16,6 +16,7 @@ import requests
 
 from outlook_web.errors import build_error_payload
 from outlook_web.repositories import settings as settings_repo
+from outlook_web.repositories import accounts as accounts_repo
 from outlook_web.services.http import get_response_details
 from outlook_web.services.oauth_refresh import post_refresh_token
 from outlook_web.services.notification_transport import retry_after_seconds
@@ -45,8 +46,8 @@ _graph_token_inflight: Dict[str, Future] = {}
 _graph_token_lock = threading.Lock()
 
 
-def _graph_token_key(client_id, refresh_token, proxy_url, client_secret) -> str:
-    credentials = json.dumps([client_id, refresh_token, proxy_url or "", client_secret or ""], ensure_ascii=False)
+def _graph_token_key(client_id, refresh_token, proxy_url, client_secret, account_id=None) -> str:
+    credentials = json.dumps([client_id, refresh_token, proxy_url or "", client_secret or "", account_id], ensure_ascii=False)
     return hashlib.sha256(credentials.encode("utf-8")).hexdigest()
 
 
@@ -68,10 +69,10 @@ def clear_graph_token_cache() -> None:
         _graph_token_inflight.clear()
 
 
-def invalidate_graph_access_token(client_id: str, refresh_token: str, proxy_url: str = None) -> None:
+def invalidate_graph_access_token(client_id: str, refresh_token: str, proxy_url: str = None, *, account_id: int | None = None) -> None:
     """Invalidate a rejected access token and all of its rotated-token aliases."""
     client_secret = settings_repo.get_oauth_client_secret_for_client(client_id)
-    key = _graph_token_key(client_id, refresh_token, proxy_url, client_secret)
+    key = _graph_token_key(client_id, refresh_token, proxy_url, client_secret, account_id)
     with _graph_token_lock:
         entry = _graph_token_cache.get(key)
         if entry is not None:
@@ -106,11 +107,11 @@ def build_token_url(tenant: str | None = None) -> str:
     return TOKEN_URL_TEMPLATE.format(tenant=normalized_tenant)
 
 
-def get_access_token_graph_result(client_id: str, refresh_token: str, proxy_url: str = None) -> Dict[str, Any]:
+def get_access_token_graph_result(client_id: str, refresh_token: str, proxy_url: str = None, *, account_id: int | None = None) -> Dict[str, Any]:
     """Get a token with bounded expiry, same-key single flight and rate cooldown."""
     try:
         client_secret = settings_repo.get_oauth_client_secret_for_client(client_id)
-        key = _graph_token_key(client_id, refresh_token, proxy_url, client_secret)
+        key = _graph_token_key(client_id, refresh_token, proxy_url, client_secret, account_id)
     except Exception as exc:
         return _graph_token_exception(exc)
 
@@ -136,6 +137,14 @@ def get_access_token_graph_result(client_id: str, refresh_token: str, proxy_url:
     started_at = time.monotonic()
     try:
         result = _refresh_graph_access_token(client_id, refresh_token, proxy_url, client_secret)
+        if result.get("success") and account_id is not None:
+            try:
+                persisted = accounts_repo.persist_token_refresh(account_id, client_id, refresh_token, result.get("new_refresh_token"))
+                result["refresh_token"] = persisted
+                result["new_refresh_token"] = persisted
+            except accounts_repo.TokenPersistenceError:
+                result = {"success": False, "retry_after": None, "error": build_error_payload(
+                    "TOKEN_PERSISTENCE_FAILED", "保存刷新令牌失败", "TokenPersistenceError", 500, "Token persistence failed")}
         lifetime = _graph_token_lifetime(result.get("expires_in")) if result.get("success") else result.get("retry_after")
         expires_at = started_at + lifetime if result.get("success") and lifetime else time.monotonic() + (lifetime or 0)
         with _graph_token_lock:
@@ -146,7 +155,7 @@ def get_access_token_graph_result(client_id: str, refresh_token: str, proxy_url:
                     _graph_token_cache[key] = entry
                     rotated = result.get("new_refresh_token")
                     if result.get("success") and isinstance(rotated, str) and rotated.strip():
-                        alias = _graph_token_key(client_id, rotated, proxy_url, client_secret)
+                        alias = _graph_token_key(client_id, rotated, proxy_url, client_secret, account_id)
                         _graph_token_cache[alias] = entry
                     _prune_graph_token_cache(time.monotonic())
                 del _graph_token_inflight[key]
@@ -256,9 +265,9 @@ def has_mail_read_permission(scope: Any) -> bool:
     return any(mail_scope in scope_str for mail_scope in GRAPH_MAIL_READ_SCOPES)
 
 
-def get_access_token_graph(client_id: str, refresh_token: str, proxy_url: str = None) -> Optional[str]:
+def get_access_token_graph(client_id: str, refresh_token: str, proxy_url: str = None, *, account_id: int | None = None) -> Optional[str]:
     """获取 Graph API access_token"""
-    result = get_access_token_graph_result(client_id, refresh_token, proxy_url)
+    result = get_access_token_graph_result(client_id, refresh_token, proxy_url, account_id=account_id)
     if result.get("success"):
         return result.get("access_token")
     return None
@@ -271,9 +280,11 @@ def get_emails_graph(
     skip: int = 0,
     top: int = 20,
     proxy_url: str = None,
+    *,
+    account_id: int | None = None,
 ) -> Dict[str, Any]:
     """使用 Graph API 获取邮件列表（支持分页和文件夹选择）"""
-    token_result = get_access_token_graph_result(client_id, refresh_token, proxy_url)
+    token_result = get_access_token_graph_result(client_id, refresh_token, proxy_url, account_id=account_id)
     if not token_result.get("success"):
         return {"success": False, "error": token_result.get("error")}
 
@@ -319,7 +330,7 @@ def get_emails_graph(
 
         if res.status_code != 200:
             if res.status_code == GRAPH_AUTH_EXPIRED_STATUS:
-                invalidate_graph_access_token(client_id, refresh_token, proxy_url)
+                invalidate_graph_access_token(client_id, refresh_token, proxy_url, account_id=account_id)
             details = get_response_details(res)
             return {
                 "success": False,
@@ -356,9 +367,11 @@ def get_email_detail_graph(
     refresh_token: str,
     message_id: str,
     proxy_url: str = None,
+    *,
+    account_id: int | None = None,
 ) -> Optional[Dict]:
     """使用 Graph API 获取邮件详情"""
-    access_token = get_access_token_graph(client_id, refresh_token, proxy_url)
+    access_token = get_access_token_graph(client_id, refresh_token, proxy_url, account_id=account_id)
     if not access_token:
         return None
 
@@ -377,7 +390,7 @@ def get_email_detail_graph(
 
         if res.status_code != 200:
             if res.status_code == GRAPH_AUTH_EXPIRED_STATUS:
-                invalidate_graph_access_token(client_id, refresh_token, proxy_url)
+                invalidate_graph_access_token(client_id, refresh_token, proxy_url, account_id=account_id)
             return None
 
         return res.json()
@@ -390,9 +403,11 @@ def get_email_raw_graph(
     refresh_token: str,
     message_id: str,
     proxy_url: str = None,
+    *,
+    account_id: int | None = None,
 ) -> Optional[str]:
     """使用 Graph API 获取邮件 MIME RAW 内容。"""
-    access_token = get_access_token_graph(client_id, refresh_token, proxy_url)
+    access_token = get_access_token_graph(client_id, refresh_token, proxy_url, account_id=account_id)
     if not access_token:
         return None
 
@@ -407,7 +422,7 @@ def get_email_raw_graph(
 
         if res.status_code != 200:
             if res.status_code == GRAPH_AUTH_EXPIRED_STATUS:
-                invalidate_graph_access_token(client_id, refresh_token, proxy_url)
+                invalidate_graph_access_token(client_id, refresh_token, proxy_url, account_id=account_id)
             return None
 
         res.encoding = res.encoding or "utf-8"
@@ -506,9 +521,11 @@ def delete_emails_graph(
     refresh_token: str,
     message_ids: List[str],
     proxy_url: str = None,
+    *,
+    account_id: int | None = None,
 ) -> Dict[str, Any]:
     """通过 Graph API 批量删除邮件（永久删除）"""
-    token_result = get_access_token_graph_result(client_id, refresh_token, proxy_url)
+    token_result = get_access_token_graph_result(client_id, refresh_token, proxy_url, account_id=account_id)
     if not token_result.get("success"):
         return {"success": False, "error": token_result.get("error")}
 
@@ -560,7 +577,7 @@ def delete_emails_graph(
                         success_count += 1
                     else:
                         if res.get("status") == GRAPH_AUTH_EXPIRED_STATUS:
-                            invalidate_graph_access_token(client_id, refresh_token, proxy_url)
+                            invalidate_graph_access_token(client_id, refresh_token, proxy_url, account_id=account_id)
                         failed_count += 1
                         try:
                             errors.append(f"Msg ID: {batch[int(res['id'])]}, Status: {res.get('status')}")
@@ -568,7 +585,7 @@ def delete_emails_graph(
                             errors.append(f"Status: {res.get('status')}")
             else:
                 if response.status_code == GRAPH_AUTH_EXPIRED_STATUS:
-                    invalidate_graph_access_token(client_id, refresh_token, proxy_url)
+                    invalidate_graph_access_token(client_id, refresh_token, proxy_url, account_id=account_id)
                 failed_count += len(batch)
                 errors.append(f"Batch request failed: {response.text}")
         except Exception as e:

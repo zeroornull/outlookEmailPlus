@@ -133,7 +133,7 @@ const SummaryPane: React.FC<{ data?: OverviewSummary; loading: boolean }> = ({
             statistic={{
               title: '总账号数',
               value: account.total || 0,
-              description: `活跃 ${formatNumber(account.active || 0)}`,
+              description: `授权有效 / IMAP 已启用 ${formatNumber(account.active || 0)}`,
             }}
           />
         </Col>
@@ -175,7 +175,7 @@ const SummaryPane: React.FC<{ data?: OverviewSummary; loading: boolean }> = ({
             <ProgressList
               items={[
                 {
-                  label: '活跃',
+                  label: '授权有效 / IMAP 已启用',
                   value: account.active || 0,
                   total: account.total || 0,
                   status: 'success',
@@ -205,7 +205,7 @@ const SummaryPane: React.FC<{ data?: OverviewSummary; loading: boolean }> = ({
               ]}
             />
             <Typography.Text type="secondary">
-              Outlook 按最新令牌刷新结果判断；普通 IMAP 按启用状态统计，未验证连接。
+              Outlook 授权有效仅表示 Token 刷新成功，未验证邮箱读取权限；普通 IMAP 按启用状态统计，未验证连接。
             </Typography.Text>
           </ProCard>
         </Col>

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from outlook_web.repositories import accounts as accounts_repo
+
 import json
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -56,13 +58,14 @@ def delete_emails_with_fallback(
     delete_emails_imap: Callable[[str, str, str, List[str], str], Dict[str, Any]],
     imap_server_new: str,
     imap_server_old: str,
+    account_id: int | None = None,
 ) -> Tuple[Dict[str, Any], Optional[str]]:
     """
     删除邮件（Graph 优先，IMAP 回退）并保持对外错误聚合结构一致。
 
     返回: (response_data, method)；method 为 'graph'/'imap_new'/'imap_old' 或 None。
     """
-    graph_res = delete_emails_graph(client_id, refresh_token, message_ids, proxy_url)
+    graph_res = delete_emails_graph(client_id, refresh_token, message_ids, proxy_url, account_id=account_id)
     if graph_res.get("success"):
         return graph_res, "graph"
 
@@ -81,12 +84,16 @@ def delete_emails_with_fallback(
         "graph": graph_error or graph_errors_list or "Graph API 删除失败",
     }
 
-    imap_res = delete_emails_imap(email_addr, client_id, refresh_token, message_ids, imap_server_new)
+    if account_id is not None:
+        refresh_token = (accounts_repo.get_account_by_id(account_id) or {}).get("refresh_token", refresh_token)
+    imap_res = delete_emails_imap(email_addr, client_id, refresh_token, message_ids, imap_server_new, account_id=account_id)
     if imap_res.get("success"):
         return imap_res, "imap_new"
     method_errors["imap_new"] = imap_res.get("error") or imap_res
 
-    imap_old_res = delete_emails_imap(email_addr, client_id, refresh_token, message_ids, imap_server_old)
+    if account_id is not None:
+        refresh_token = (accounts_repo.get_account_by_id(account_id) or {}).get("refresh_token", refresh_token)
+    imap_old_res = delete_emails_imap(email_addr, client_id, refresh_token, message_ids, imap_server_old, account_id=account_id)
     if imap_old_res.get("success"):
         return imap_old_res, "imap_old"
     method_errors["imap_old"] = imap_old_res.get("error") or imap_old_res

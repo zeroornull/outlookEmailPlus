@@ -262,7 +262,7 @@ class TestTelegramPreviewDelivery(unittest.TestCase):
         with patch("outlook_web.services.graph.get_access_token_graph_result", return_value={"success": True, "access_token": "access"}), patch(
             "outlook_web.services.telegram_push.requests.get", return_value=response
         ) as get:
-            emails = _fetch_new_emails_graph({}, "2026-03-01T00:00:00")
+            emails = _fetch_new_emails_graph({"id": 10}, "2026-03-01T00:00:00")
         self.assertEqual(emails[0]["html_content"], "<p>Original HTML</p>")
         self.assertEqual(emails[0]["content"], "Original HTML")
         get.assert_called_once()

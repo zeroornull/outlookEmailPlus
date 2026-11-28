@@ -376,7 +376,7 @@ def _fetch_new_emails_graph(account: dict, since: str, folder: str = "inbox") ->
     client_id = account.get("client_id", "")
     refresh_token = decrypt_data(account.get("refresh_token", ""))
     proxy_url = account.get("proxy_url", "") or ""
-    token_result = get_access_token_graph_result(client_id, refresh_token, proxy_url)
+    token_result = get_access_token_graph_result(client_id, refresh_token, proxy_url, account_id=int(account["id"]))
     if not token_result.get("success") or not token_result.get("access_token"):
         error = token_result.get("error") or {}
         code = error.get("code", "GRAPH_AUTH_FAILED") if isinstance(error, dict) else str(error)
@@ -384,8 +384,6 @@ def _fetch_new_emails_graph(account: dict, since: str, folder: str = "inbox") ->
         raise NotificationTransportError("Graph token acquisition failed", code=code, retry_after=token_result.get("retry_after"), status=status)
     rotated = token_result.get("new_refresh_token") or token_result.get("refresh_token")
     if rotated and rotated != refresh_token:
-        if account.get("id"):
-            accounts_repo.update_refresh_token_if_changed(int(account["id"]), rotated)
         account["refresh_token"] = rotated
         refresh_token = rotated
     folder_name = (folder or "inbox").strip().lower()
@@ -411,7 +409,7 @@ def _fetch_new_emails_graph(account: dict, since: str, folder: str = "inbox") ->
             raise NotificationTransportError("Graph request failed", code="GRAPH_FETCH_FAILED") from exc
         if not resp.ok:
             if resp.status_code == 401:
-                invalidate_graph_access_token(client_id, refresh_token, proxy_url)
+                invalidate_graph_access_token(client_id, refresh_token, proxy_url, account_id=int(account["id"]))
             raise NotificationTransportError("Graph message fetch failed", code="GRAPH_RATE_LIMITED" if resp.status_code == 429 else "GRAPH_FETCH_FAILED", retry_after=retry_after_seconds(resp.headers.get("Retry-After")), status=resp.status_code)
         try:
             data = resp.json()

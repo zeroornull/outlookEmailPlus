@@ -269,7 +269,7 @@
                                 title="${escapeHtml(translateCompactText('点击复制邮箱地址'))}"
                             >
                                 <span class="mail-address">${escapeHtml(account.email || '')}</span>
-                                <div class="mail-meta" title="${escapeHtml(`${providerText} · ${statusText}`)}">
+                                <div class="mail-meta" title="${escapeHtml([`${providerText} · ${statusText}`, formatAccountHealthHelp(account)].filter(Boolean).join(' '))}">
                                     ${escapeHtml(providerText)} · ${escapeHtml(statusText)}
                                 </div>
                             </button>

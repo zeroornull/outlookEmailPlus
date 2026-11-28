@@ -17,14 +17,23 @@ describe('refreshStatusLabel', () => {
 
 describe('healthStatusLabel', () => {
   it.each([
-    ['active', '正常', 'success'],
+    ['active', '授权有效', 'success'],
     ['disabled', '停用', 'default'],
     ['expired', '授权过期', 'error'],
     ['error', '刷新异常', 'error'],
     ['pending_refresh', '待验证', 'gold'],
   ])('displays health %s with its matching color', (health, label, color) => {
-    expect(healthStatusLabel(health)).toBe(label);
+    expect(healthStatusLabel(health, { provider: 'outlook' })).toBe(label);
     expect(healthStatusColor(health)).toBe(color);
+  });
+
+  it.each([
+    undefined,
+    { provider: 'imap_generic', account_type: 'imap' },
+    { provider: 'custom', account_type: 'imap' },
+    { provider: 'outlook', account_type: 'imap' },
+  ])('preserves the administrative active label for %s', (account) => {
+    expect(healthStatusLabel('active', account)).toBe(accountStatusLabel('active'));
   });
 
   it.each(['inactive', 'pending', 'unknown', '', null, undefined])(

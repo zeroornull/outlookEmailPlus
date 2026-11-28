@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from outlook_web.repositories import accounts as accounts_repo
+
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional
@@ -201,7 +203,9 @@ def fetch_emails_for_channel(
             skip=int(skip or 0),
             top=int(top or 20),
             proxy_url=proxy_url,
+            account_id=int(account["id"]),
         )
+        account["refresh_token"] = (accounts_repo.get_account_by_id(int(account["id"])) or {}).get("refresh_token", account.get("refresh_token", ""))
         if not graph_result.get("success"):
             return {
                 "success": False,
@@ -230,7 +234,9 @@ def fetch_emails_for_channel(
         skip=int(skip or 0),
         top=int(top or 20),
         server=imap_server,
+        account_id=int(account["id"]),
     )
+    account["refresh_token"] = (accounts_repo.get_account_by_id(int(account["id"])) or {}).get("refresh_token", account.get("refresh_token", ""))
     if not imap_result.get("success"):
         return {
             "success": False,
@@ -257,34 +263,39 @@ def fetch_email_detail_for_channel(
         return None
 
     if normalized in (CHANNEL_GRAPH_INBOX, CHANNEL_GRAPH_JUNK):
-        return graph_service.get_email_detail_graph(
+        detail = graph_service.get_email_detail_graph(
             str(account.get("client_id") or ""),
             str(account.get("refresh_token") or ""),
             str(message_id),
             proxy_url,
+            account_id=int(account["id"]),
         )
-
+        account["refresh_token"] = (accounts_repo.get_account_by_id(int(account["id"])) or {}).get("refresh_token", account.get("refresh_token", ""))
+        return detail
     folder_name = str(folder or "inbox").strip().lower() or "inbox"
     if normalized == CHANNEL_IMAP_NEW:
-        return imap_service.get_email_detail_imap_with_server(
+        detail = imap_service.get_email_detail_imap_with_server(
             str(account.get("email") or ""),
             str(account.get("client_id") or ""),
             str(account.get("refresh_token") or ""),
             str(message_id),
             folder_name,
             IMAP_SERVER_NEW,
+            account_id=int(account["id"]),
         )
-
-    return imap_service.get_email_detail_imap_with_server(
+        account["refresh_token"] = (accounts_repo.get_account_by_id(int(account["id"])) or {}).get("refresh_token", account.get("refresh_token", ""))
+        return detail
+    detail = imap_service.get_email_detail_imap_with_server(
         str(account.get("email") or ""),
         str(account.get("client_id") or ""),
         str(account.get("refresh_token") or ""),
         str(message_id),
         folder_name,
         IMAP_SERVER_OLD,
+        account_id=int(account["id"]),
     )
-
-
+    account["refresh_token"] = (accounts_repo.get_account_by_id(int(account["id"])) or {}).get("refresh_token", account.get("refresh_token", ""))
+    return detail
 def fetch_emails_and_detail_for_channel(
     *,
     account: Dict[str, Any],
@@ -326,7 +337,9 @@ def fetch_emails_and_detail_for_channel(
         skip=int(skip or 0),
         top=int(top or 20),
         server=server,
+        account_id=int(account["id"]),
     )
+    account["refresh_token"] = (accounts_repo.get_account_by_id(int(account["id"])) or {}).get("refresh_token", account.get("refresh_token", ""))
 
     # 兼容回退：当连接复用路径失败时，降级到原 list + detail 两次调用。
     if not result.get("success"):
@@ -338,7 +351,9 @@ def fetch_emails_and_detail_for_channel(
             skip=int(skip or 0),
             top=int(top or 20),
             server=server,
+            account_id=int(account["id"]),
         )
+        account["refresh_token"] = (accounts_repo.get_account_by_id(int(account["id"])) or {}).get("refresh_token", account.get("refresh_token", ""))
         if not legacy_list.get("success"):
             return {
                 "success": False,
@@ -362,7 +377,9 @@ def fetch_emails_and_detail_for_channel(
                     latest_id,
                     folder_name,
                     server,
+                    account_id=int(account["id"]),
                 )
+                account["refresh_token"] = (accounts_repo.get_account_by_id(int(account["id"])) or {}).get("refresh_token", account.get("refresh_token", ""))
 
         return {
             "success": True,
@@ -476,7 +493,9 @@ def extract_verification_for_outlook(
                 str(account.get("client_id") or ""),
                 str(account.get("refresh_token") or ""),
                 proxy_url or None,
+                account_id=int(account["id"]),
             )
+            account["refresh_token"] = (accounts_repo.get_account_by_id(int(account["id"])) or {}).get("refresh_token", account.get("refresh_token", ""))
             if precheck.get("new_refresh_token"):
                 account["refresh_token"] = str(precheck.get("new_refresh_token") or "")
             if precheck.get("success") and not graph_service.has_mail_read_permission(precheck.get("scope", "")):
@@ -632,7 +651,6 @@ def extract_verification_for_outlook(
 
             if _is_extraction_success(extracted, expected_field):
                 try:
-                    from outlook_web.repositories import accounts as accounts_repo
 
                     accounts_repo.update_preferred_verification_channel(int(account["id"]), channel)
                 except Exception:

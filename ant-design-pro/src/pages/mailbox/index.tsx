@@ -44,6 +44,7 @@ import MailboxFolderSwitch, {
 import { usePollingSettingsDraft } from '@/hooks/usePollingSettingsDraft';
 import { summarizeDualFolderPull } from '@/utils/mailboxPull';
 import { isMailboxRoute } from '@/utils/mailboxRoute';
+import { accountStatusLabel, healthStatusColor, healthStatusHelp, healthStatusLabel } from '@/utils/statusLabels';
 import { type AccountItem, fetchAccounts } from '@/services/outlook/accounts';
 import {
   deleteEmails,
@@ -810,11 +811,6 @@ const MailboxPage: React.FC = () => {
       account.account_type ||
       'outlook'
     ).toUpperCase();
-    const isActive =
-      String(account.status || '').toLowerCase() === 'active' ||
-      !account.status;
-    const isFailed =
-      String(account.last_refresh_status || '').toLowerCase() === 'failed';
     const userTags = (account.tags || [])
       .map((t) => (typeof t === 'string' ? t : t?.name))
       .filter(Boolean) as string[];
@@ -824,11 +820,12 @@ const MailboxPage: React.FC = () => {
           {providerText}
         </Tag>
         <Tag
-          color={isFailed ? 'error' : isActive ? 'success' : 'default'}
+          color={healthStatusColor(account.health_status ?? account.status)}
+          title={healthStatusHelp(account)}
           variant="outlined"
           style={{ marginInlineEnd: 0 }}
         >
-          {isFailed ? '刷新失败' : account.status || 'active'}
+          {account.health_status ? healthStatusLabel(account.health_status, account) : accountStatusLabel(account.status)}
         </Tag>
         {isPolling(account.email) ? (
           <Badge status="processing" text="监听中" />

@@ -14,7 +14,8 @@ from outlook_web.repositories.distributed_locks import (
     release_distributed_lock,
 )
 from outlook_web.repositories.refresh_runs import create_refresh_run, finish_refresh_run
-from outlook_web.security.crypto import decrypt_data, encrypt_data
+from outlook_web.repositories import accounts as accounts_repo
+from outlook_web.security.crypto import decrypt_data
 
 REFRESH_LOCK_TTL_SECONDS = 60 * 60 * 2  # 2 小时，避免异常中断导致长时间卡死
 
@@ -30,7 +31,7 @@ def build_refreshable_outlook_account_where(
 
 REFRESHABLE_OUTLOOK_ACCOUNT_WHERE = build_refreshable_outlook_account_where()
 REFRESHABLE_OUTLOOK_ACCOUNT_SELECT = f"""
-    SELECT id, email, client_id, refresh_token, group_id
+    SELECT id, email, client_id, refresh_token, group_id, last_refresh_at
     FROM accounts
     WHERE status = 'active'
       AND {REFRESHABLE_OUTLOOK_ACCOUNT_WHERE}
@@ -116,6 +117,95 @@ def compute_refresh_lock_ttl_seconds(total: int, delay_seconds: int) -> int:
     estimated = int(total * (max(delay_seconds, 0) + 2) + 600)
     ttl = max(REFRESH_LOCK_TTL_SECONDS, estimated)
     return min(ttl, 60 * 60 * 24)  # 最大 24 小时
+
+
+def get_refresh_schedule_timezone():
+    """Use the timezone configured on APScheduler, including DST rules."""
+    from outlook_web.services.scheduler import get_scheduler_instance
+
+    scheduler = get_scheduler_instance()
+    if scheduler is not None:
+        return scheduler.timezone
+    from tzlocal import get_localzone
+
+    return get_localzone()
+
+
+def _account_refresh_due_at(account, refresh_interval_days: int, schedule_timezone):
+    try:
+        value = account["last_refresh_at"]
+        refreshed_at = datetime.fromisoformat(value) if value else None
+        if refreshed_at is None:
+            return None
+        if refreshed_at.tzinfo is None:
+            refreshed_at = refreshed_at.replace(tzinfo=timezone.utc)
+        due_day = refreshed_at.astimezone(schedule_timezone).date() + timedelta(days=max(1, int(refresh_interval_days)))
+        due_at = datetime.combine(due_day, datetime.min.time()).replace(hour=2)
+        if hasattr(schedule_timezone, "localize"):
+            return schedule_timezone.localize(due_at)
+        return due_at.replace(tzinfo=schedule_timezone)
+    except (TypeError, ValueError):
+        return None
+
+
+def select_due_refresh_accounts(accounts, refresh_interval_days: int, *, now=None):
+    """Evaluate each successful refresh against the local daily 02:00 calendar boundary."""
+    schedule_timezone = get_refresh_schedule_timezone()
+    current = now if now is not None else utcnow()
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    local_now = current.astimezone(schedule_timezone)
+    due_accounts = []
+    for account in accounts:
+        due_at = _account_refresh_due_at(account, refresh_interval_days, schedule_timezone)
+        if due_at is None or due_at <= local_now:
+            due_accounts.append(account)
+    return due_accounts
+
+
+def persist_refresh_result(
+    connection,
+    *,
+    account_id,
+    account_email,
+    client_id,
+    previous_refresh_token,
+    new_refresh_token,
+    refresh_type,
+    success,
+    error_message,
+    run_id=None,
+):
+    """Commit credentials, timestamp and success log as one transaction."""
+    insert_log = """
+        INSERT INTO account_refresh_logs (account_id, account_email, refresh_type, status, error_message, run_id)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """
+    try:
+        last_refresh_at = None
+        if success:
+            accounts_repo.persist_token_refresh(
+                account_id, client_id, previous_refresh_token, new_refresh_token, connection=connection
+            )
+            row = connection.execute("SELECT last_refresh_at FROM accounts WHERE id = ?", (account_id,)).fetchone()
+            last_refresh_at = row["last_refresh_at"]
+        connection.execute(
+            insert_log, (account_id, account_email, refresh_type, "success" if success else "failed", error_message, run_id)
+        )
+        connection.commit()
+        return success, error_message, last_refresh_at
+    except Exception as exc:
+        connection.rollback()
+        error_message = (
+            str(exc) if isinstance(exc, accounts_repo.TokenPersistenceError)
+            else "Token persistence failed: unable to save refresh result"
+        )
+        try:
+            connection.execute(insert_log, (account_id, account_email, refresh_type, "failed", error_message, run_id))
+            connection.commit()
+        except Exception:
+            connection.rollback()
+        return False, error_message, None
 
 
 def stream_refresh_all_accounts(
@@ -262,43 +352,11 @@ def stream_refresh_all_accounts(
 
             success, error_msg, new_refresh_token = test_refresh_token(client_id, refresh_token, proxy_url)
 
-            try:
-                conn.execute(
-                    """
-                    INSERT INTO account_refresh_logs (account_id, account_email, refresh_type, status, error_message, run_id)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                    (
-                        account_id,
-                        account_email,
-                        "manual_all",
-                        "success" if success else "failed",
-                        error_msg,
-                        run_id,
-                    ),
-                )
-
-                if success:
-                    if isinstance(new_refresh_token, str) and new_refresh_token.strip() and new_refresh_token != refresh_token:
-                        conn.execute(
-                            """
-                            UPDATE accounts
-                            SET refresh_token = ?, updated_at = CURRENT_TIMESTAMP
-                            WHERE id = ?
-                        """,
-                            (encrypt_data(new_refresh_token), account_id),
-                        )
-                    conn.execute(
-                        """
-                        UPDATE accounts
-                        SET last_refresh_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-                        WHERE id = ?
-                    """,
-                        (account_id,),
-                    )
-                conn.commit()
-            except Exception:
-                pass
+            success, error_msg, _ = persist_refresh_result(
+                conn, account_id=account_id, account_email=account_email, client_id=client_id,
+                previous_refresh_token=refresh_token, new_refresh_token=new_refresh_token,
+                refresh_type="manual_all", success=success, error_message=error_msg, run_id=run_id,
+            )
 
             if success:
                 success_count += 1
@@ -416,49 +474,22 @@ def stream_trigger_scheduled_refresh(
             total=total,
         )
 
+        candidate_accounts = accounts
         if (not force) and (not use_cron):
-            row = conn.execute("""
-                SELECT finished_at
-                FROM refresh_runs
-                WHERE trigger_source IN ('scheduled', 'scheduled_manual')
-                  AND status IN ('completed', 'failed')
-                  AND finished_at IS NOT NULL
-                ORDER BY finished_at DESC
-                LIMIT 1
-            """).fetchone()
-
-            if row and row["finished_at"]:
-                try:
-                    last_time = datetime.fromisoformat(row["finished_at"])
-                except Exception:
-                    last_time = None
-
-                if last_time:
-                    next_due = last_time + timedelta(days=refresh_interval_days)
-                    if utcnow() < next_due:
-                        finish_refresh_run(
-                            conn,
-                            run_id,
-                            "skipped",
-                            0,
-                            0,
-                            0,
-                            f"距离上次刷新未满 {refresh_interval_days} 天，下次最早：{next_due.strftime('%Y-%m-%d %H:%M:%S')}",
-                        )
-                        yield (
-                            "data: "
-                            + json.dumps(
-                                {
-                                    "type": "skipped",
-                                    "message": "未到刷新周期",
-                                    "next_due": next_due.isoformat(),
-                                    "run_id": run_id,
-                                },
-                                ensure_ascii=False,
-                            )
-                            + "\n\n"
-                        )
-                        return
+            accounts = select_due_refresh_accounts(accounts, refresh_interval_days)
+            total = len(accounts)
+            conn.execute("UPDATE refresh_runs SET total = ? WHERE id = ?", (total, run_id))
+            conn.commit()
+        if not accounts:
+            schedule_timezone = get_refresh_schedule_timezone()
+            due_times = [
+                _account_refresh_due_at(account, refresh_interval_days, schedule_timezone)
+                for account in candidate_accounts
+            ]
+            next_due = min(due_times).isoformat() if due_times else None
+            finish_refresh_run(conn, run_id, "skipped", 0, 0, 0, "没有到期的 Outlook 账号")
+            yield f"data: {json.dumps({'type': 'skipped', 'message': '没有到期的 Outlook 账号', 'next_due': next_due, 'run_id': run_id}, ensure_ascii=False)}\n\n"
+            return
 
         ttl_seconds = compute_refresh_lock_ttl_seconds(total, delay_seconds)
         ok, lock_info = acquire_distributed_lock(conn, lock_name, lock_owner_id, ttl_seconds)
@@ -563,44 +594,11 @@ def stream_trigger_scheduled_refresh(
 
             success, error_msg, new_refresh_token = test_refresh_token(client_id, refresh_token, proxy_url)
 
-            try:
-                conn.execute(
-                    """
-                    INSERT INTO account_refresh_logs (account_id, account_email, refresh_type, status, error_message, run_id)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                    (
-                        account_id,
-                        account_email,
-                        "scheduled",
-                        "success" if success else "failed",
-                        error_msg,
-                        run_id,
-                    ),
-                )
-
-                if success:
-                    if isinstance(new_refresh_token, str) and new_refresh_token.strip() and new_refresh_token != refresh_token:
-                        conn.execute(
-                            """
-                            UPDATE accounts
-                            SET refresh_token = ?, updated_at = CURRENT_TIMESTAMP
-                            WHERE id = ?
-                        """,
-                            (encrypt_data(new_refresh_token), account_id),
-                        )
-                    conn.execute(
-                        """
-                        UPDATE accounts
-                        SET last_refresh_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-                        WHERE id = ?
-                    """,
-                        (account_id,),
-                    )
-
-                conn.commit()
-            except Exception:
-                pass
+            success, error_msg, _ = persist_refresh_result(
+                conn, account_id=account_id, account_email=account_email, client_id=client_id,
+                previous_refresh_token=refresh_token, new_refresh_token=new_refresh_token,
+                refresh_type="scheduled", success=success, error_message=error_msg, run_id=run_id,
+            )
 
             if success:
                 success_count += 1
@@ -854,51 +852,11 @@ def stream_refresh_selected_accounts(
 
             success, error_msg, new_refresh_token = test_refresh_token(client_id, refresh_token, proxy_url)
 
-            last_refresh_at = None
-            try:
-                conn.execute(
-                    """
-                    INSERT INTO account_refresh_logs (account_id, account_email, refresh_type, status, error_message, run_id)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                    (
-                        account_id,
-                        account_email,
-                        "manual_selected",
-                        "success" if success else "failed",
-                        error_msg,
-                        run_id,
-                    ),
-                )
-
-                if success:
-                    if isinstance(new_refresh_token, str) and new_refresh_token.strip() and new_refresh_token != refresh_token:
-                        conn.execute(
-                            """
-                            UPDATE accounts
-                            SET refresh_token = ?, updated_at = CURRENT_TIMESTAMP
-                            WHERE id = ?
-                        """,
-                            (encrypt_data(new_refresh_token), account_id),
-                        )
-                    conn.execute(
-                        """
-                        UPDATE accounts
-                        SET last_refresh_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-                        WHERE id = ?
-                    """,
-                        (account_id,),
-                    )
-                    # 取最新的 last_refresh_at 用于返回给前端
-                    row = conn.execute(
-                        "SELECT last_refresh_at FROM accounts WHERE id = ?",
-                        (account_id,),
-                    ).fetchone()
-                    if row:
-                        last_refresh_at = row["last_refresh_at"]
-                conn.commit()
-            except Exception:
-                pass
+            success, error_msg, last_refresh_at = persist_refresh_result(
+                conn, account_id=account_id, account_email=account_email, client_id=client_id,
+                previous_refresh_token=refresh_token, new_refresh_token=new_refresh_token,
+                refresh_type="manual_selected", success=success, error_message=error_msg, run_id=run_id,
+            )
 
             if success:
                 success_count += 1
@@ -1095,42 +1053,13 @@ def refresh_failed_accounts(
                 continue
 
             success, error_msg, new_refresh_token = test_refresh_token(client_id, refresh_token, proxy_url)
-            try:
-                from outlook_web.repositories.refresh_logs import log_refresh_result
-
-                log_refresh_result(
-                    account_id,
-                    account_email,
-                    "retry",
-                    "success" if success else "failed",
-                    error_msg,
-                    run_id=run_id,
-                )
-            except Exception:
-                pass
+            success, error_msg, _ = persist_refresh_result(
+                db, account_id=account_id, account_email=account_email, client_id=client_id,
+                previous_refresh_token=refresh_token, new_refresh_token=new_refresh_token,
+                refresh_type="retry", success=success, error_message=error_msg, run_id=run_id,
+            )
 
             if success:
-                try:
-                    if isinstance(new_refresh_token, str) and new_refresh_token.strip() and new_refresh_token != refresh_token:
-                        db.execute(
-                            """
-                            UPDATE accounts
-                            SET refresh_token = ?, updated_at = CURRENT_TIMESTAMP
-                            WHERE id = ?
-                        """,
-                            (encrypt_data(new_refresh_token), account_id),
-                        )
-                    db.execute(
-                        """
-                        UPDATE accounts
-                        SET last_refresh_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-                        WHERE id = ?
-                    """,
-                        (account_id,),
-                    )
-                    db.commit()
-                except Exception:
-                    pass
                 success_count += 1
             else:
                 failed_count += 1

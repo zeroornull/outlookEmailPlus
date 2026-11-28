@@ -327,7 +327,7 @@ class GraphNotificationFetchTests(unittest.TestCase):
         mocked = patch("outlook_web.services.graph.get_access_token_graph_result", return_value={"success": True, "access_token": "access"})
         self.token = mocked.start()
         self.addCleanup(mocked.stop)
-        self.account = {"client_id": "client", "refresh_token": "refresh", "proxy_url": "http://proxy.example:8888"}
+        self.account = {"id": 10, "client_id": "client", "refresh_token": "refresh", "proxy_url": "http://proxy.example:8888"}
 
     def response(self, value=None, *, status=200, next_link=None, retry_after=None):
         response = Mock(ok=status < 400, status_code=status, headers={})
@@ -375,7 +375,7 @@ class GraphNotificationFetchTests(unittest.TestCase):
             "outlook_web.services.graph.invalidate_graph_access_token"
         ) as invalidate, self.assertRaises(NotificationTransportError):
             self.fetch()
-        invalidate.assert_called_once_with("client", "refresh", self.account["proxy_url"])
+        invalidate.assert_called_once_with("client", "refresh", self.account["proxy_url"], account_id=10)
 
     def test_token_failure_is_not_an_empty_mailbox(self):
         self.token.return_value = {"success": False, "error": {"code": "RATE_LIMITED", "status": 429}, "retry_after": 20}
@@ -387,12 +387,10 @@ class GraphNotificationFetchTests(unittest.TestCase):
     def test_rotated_refresh_token_is_persisted_and_reused_for_next_folder(self):
         self.account["id"] = 10
         self.token.return_value = {"success": True, "access_token": "access", "new_refresh_token": "rotated"}
-        with patch.object(telegram_push.requests, "get", return_value=self.response()), patch(
-            "outlook_web.repositories.accounts.update_refresh_token_if_changed"
-        ) as persist:
+        with patch.object(telegram_push.requests, "get", return_value=self.response()):
             self.fetch()
             telegram_push._fetch_new_emails_graph(self.account, "2026-03-01T00:00:00", folder="junkemail")
-        persist.assert_called_once_with(10, "rotated")
+        self.assertEqual(self.token.call_args.kwargs["account_id"], 10)
         self.assertEqual(self.token.call_args.args[1], "rotated")
 
 

@@ -116,6 +116,7 @@ class ErrorAndTraceTests(unittest.TestCase):
                 accounts_repo,
                 "get_account_by_email",
                 return_value={
+                    "id": 10,
                     "email": email_addr,
                     "client_id": "cid",
                     "refresh_token": "rt",
@@ -193,6 +194,7 @@ class ErrorAndTraceTests(unittest.TestCase):
                 accounts_repo,
                 "get_account_by_email",
                 return_value={
+                    "id": 10,
                     "email": email_addr,
                     "client_id": "cid",
                     "refresh_token": "rt",

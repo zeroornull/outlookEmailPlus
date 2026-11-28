@@ -14,7 +14,7 @@ import json
 import os
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from outlook_web import config
@@ -26,7 +26,12 @@ from outlook_web.repositories.distributed_locks import (
     release_distributed_lock,
 )
 from outlook_web.repositories.refresh_runs import create_refresh_run, finish_refresh_run
-from outlook_web.security.crypto import decrypt_data, encrypt_data
+from outlook_web.security.crypto import decrypt_data
+from outlook_web.services.refresh import (
+    REFRESHABLE_OUTLOOK_ACCOUNT_SELECT,
+    persist_refresh_result,
+    select_due_refresh_accounts,
+)
 
 # 调度器实例
 _scheduler_instance = None
@@ -316,7 +321,7 @@ def configure_scheduler_jobs(scheduler, app, test_refresh_token) -> None:
             if len(parts) != 5:
                 raise ValueError("Cron 表达式格式错误，应为 5 段")
             minute, hour, day, month, day_of_week = parts
-            trigger = CronTrigger(minute=minute, hour=hour, day=day, month=month, day_of_week=day_of_week)
+            trigger = CronTrigger(minute=minute, hour=hour, day=day, month=month, day_of_week=day_of_week, timezone=scheduler.timezone)
             scheduler.add_job(
                 func=scheduled_task,
                 trigger=trigger,
@@ -334,7 +339,7 @@ def configure_scheduler_jobs(scheduler, app, test_refresh_token) -> None:
 
     scheduler.add_job(
         func=scheduled_task,
-        trigger=CronTrigger(hour=2, minute=0),
+        trigger=CronTrigger(hour=2, minute=0, timezone=scheduler.timezone),
         id="token_refresh",
         name="Token 定时刷新",
         replace_existing=True,
@@ -396,38 +401,6 @@ def scheduled_refresh_task(app, test_refresh_token):
             finish_refresh_run(conn, run_id, "skipped", 0, 0, 0, "定时刷新已禁用")
             return
 
-        # 按天数策略：未到周期则跳过（不产生账号级刷新日志）
-        if not use_cron:
-            row = conn.execute("""
-                SELECT finished_at
-                FROM refresh_runs
-                WHERE trigger_source = 'scheduled'
-                  AND status IN ('completed', 'failed')
-                  AND finished_at IS NOT NULL
-                ORDER BY finished_at DESC
-                LIMIT 1
-            """).fetchone()
-
-            if row and row["finished_at"]:
-                try:
-                    last_time = datetime.fromisoformat(row["finished_at"])
-                except Exception:
-                    last_time = None
-
-                if last_time:
-                    next_due = last_time + timedelta(days=refresh_interval_days)
-                    if utcnow() < next_due:
-                        finish_refresh_run(
-                            conn,
-                            run_id,
-                            "skipped",
-                            0,
-                            0,
-                            0,
-                            f"距离上次刷新未满 {refresh_interval_days} 天，下次最早：{next_due.strftime('%Y-%m-%d %H:%M:%S')}",
-                        )
-                        return
-
         # 获取刷新间隔配置
         delay_row = conn.execute("SELECT value FROM settings WHERE key = 'refresh_delay_seconds'").fetchone()
         delay_seconds = int(delay_row["value"]) if delay_row else 5
@@ -440,18 +413,17 @@ def scheduled_refresh_task(app, test_refresh_token):
         except Exception:
             pass
 
-        # PRD-00005 / TDD-00005：定时刷新只处理 Outlook 账号（IMAP 账号无 OAuth token 刷新语义）
-        accounts = conn.execute("""
-            SELECT id, email, client_id, refresh_token, group_id
-            FROM accounts
-            WHERE status = 'active'
-              AND (account_type = 'outlook' OR account_type IS NULL)
-        """).fetchall()
+        accounts = conn.execute(REFRESHABLE_OUTLOOK_ACCOUNT_SELECT).fetchall()
+        if not use_cron:
+            accounts = select_due_refresh_accounts(accounts, refresh_interval_days, now=utcnow())
         total = len(accounts)
 
         # 更新 run_id 的 total
         conn.execute("UPDATE refresh_runs SET total = ? WHERE id = ?", (total, run_id))
         conn.commit()
+        if not accounts:
+            finish_refresh_run(conn, run_id, "skipped", 0, 0, 0, "没有到期的 Outlook 账号")
+            return
 
         # 计算锁 TTL
         estimated = int(total * (max(delay_seconds, 0) + 2) + 600)
@@ -512,45 +484,11 @@ def scheduled_refresh_task(app, test_refresh_token):
 
             success, error_msg, new_refresh_token = test_refresh_token(client_id, refresh_token, proxy_url)
 
-            try:
-                conn.execute(
-                    """
-                    INSERT INTO account_refresh_logs (account_id, account_email, refresh_type, status, error_message, run_id)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                    (
-                        account_id,
-                        account_email,
-                        "scheduled",
-                        "success" if success else "failed",
-                        error_msg,
-                        run_id,
-                    ),
-                )
-
-                if success:
-                    # refresh token 可能滚动更新：保存新的 refresh_token（加密存储）
-                    if isinstance(new_refresh_token, str) and new_refresh_token.strip() and new_refresh_token != refresh_token:
-                        conn.execute(
-                            """
-                            UPDATE accounts
-                            SET refresh_token = ?, updated_at = CURRENT_TIMESTAMP
-                            WHERE id = ?
-                        """,
-                            (encrypt_data(new_refresh_token), account_id),
-                        )
-                    conn.execute(
-                        """
-                        UPDATE accounts
-                        SET last_refresh_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-                        WHERE id = ?
-                    """,
-                        (account_id,),
-                    )
-
-                conn.commit()
-            except Exception:
-                pass
+            success, error_msg, _ = persist_refresh_result(
+                conn, account_id=account_id, account_email=account_email, client_id=client_id,
+                previous_refresh_token=refresh_token, new_refresh_token=new_refresh_token,
+                refresh_type="scheduled", success=success, error_message=error_msg, run_id=run_id,
+            )
 
             if success:
                 success_count += 1

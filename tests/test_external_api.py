@@ -14,6 +14,29 @@ class ExternalApiBaseTest(unittest.TestCase):
         cls.app = cls.module.app
 
     def setUp(self):
+        graph_list = patch(
+            "outlook_web.services.graph.get_emails_graph",
+            return_value={"success": False, "error": {"code": "EMAIL_FETCH_FAILED", "message": "Graph unavailable in this fixture"}},
+        )
+        graph_list.start()
+        self.addCleanup(graph_list.stop)
+        # Mailbox fixtures below own list/detail responses; isolate the separate
+        # OAuth precheck and unselected IMAP fallback from Microsoft endpoints.
+        token_precheck = patch(
+            "outlook_web.services.graph.get_access_token_graph_result",
+            return_value={"success": True, "scope": "Mail.Read"},
+        )
+        token_precheck.start()
+        self.addCleanup(token_precheck.stop)
+        imap_token = patch(
+            "outlook_web.services.imap.get_access_token_imap_result",
+            return_value={"success": False, "error": {"code": "IMAP_TOKEN_FAILED", "message": "IMAP unavailable in this fixture"}},
+        )
+        imap_token.start()
+        self.addCleanup(imap_token.stop)
+        raw_message = patch("outlook_web.services.graph.get_email_raw_graph", return_value=None)
+        raw_message.start()
+        self.addCleanup(raw_message.stop)
         with self.app.app_context():
             clear_login_attempts()
             from outlook_web.db import get_db

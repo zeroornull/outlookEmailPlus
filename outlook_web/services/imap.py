@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from outlook_web.errors import build_error_payload
 from outlook_web.repositories import settings as settings_repo
-from outlook_web.services.graph import get_access_token_graph
+from outlook_web.repositories import accounts as accounts_repo
 from outlook_web.services.http import get_response_details
 from outlook_web.services.oauth_refresh import post_refresh_token
 
@@ -234,9 +234,9 @@ def clear_imap_token_cache(client_id: str = None) -> None:
                 del _token_cache[key]
 
 
-def get_access_token_imap_result(client_id: str, refresh_token: str) -> Dict[str, Any]:
+def get_access_token_imap_result(client_id: str, refresh_token: str, *, account_id: int | None = None) -> Dict[str, Any]:
     """获取 IMAP access_token（包含错误详情）"""
-    cache_key = _make_cache_key(client_id, refresh_token)
+    cache_key = _make_cache_key(client_id, refresh_token) + f":{account_id}"
     with _token_cache_lock:
         cached = _token_cache.get(cache_key)
         if cached:
@@ -283,6 +283,12 @@ def get_access_token_imap_result(client_id: str, refresh_token: str) -> Dict[str
                 ),
             }
 
+        if account_id is not None:
+            try:
+                accounts_repo.persist_token_refresh(account_id, client_id, refresh_token, payload.get("refresh_token"))
+            except accounts_repo.TokenPersistenceError:
+                return {"success": False, "error": build_error_payload(
+                    "TOKEN_PERSISTENCE_FAILED", "保存刷新令牌失败", "TokenPersistenceError", 500, "Token persistence failed")}
         expires_in = int(payload.get("expires_in", 3599))
         ttl = max(0, expires_in - 60)
         with _token_cache_lock:
@@ -302,9 +308,9 @@ def get_access_token_imap_result(client_id: str, refresh_token: str) -> Dict[str
         }
 
 
-def get_access_token_imap(client_id: str, refresh_token: str) -> Optional[str]:
+def get_access_token_imap(client_id: str, refresh_token: str, *, account_id: int | None = None) -> Optional[str]:
     """获取 IMAP access_token"""
-    result = get_access_token_imap_result(client_id, refresh_token)
+    result = get_access_token_imap_result(client_id, refresh_token, account_id=account_id)
     if result.get("success"):
         return result.get("access_token")
     return None
@@ -317,9 +323,11 @@ def get_emails_imap(
     folder: str = "inbox",
     skip: int = 0,
     top: int = 20,
+    *,
+    account_id: int | None = None,
 ) -> Dict[str, Any]:
     """使用 IMAP 获取邮件列表（支持分页和文件夹选择）- 默认使用新版服务器"""
-    return get_emails_imap_with_server(account, client_id, refresh_token, folder, skip, top, IMAP_SERVER_NEW)
+    return get_emails_imap_with_server(account, client_id, refresh_token, folder, skip, top, IMAP_SERVER_NEW, account_id=account_id)
 
 
 def get_emails_imap_with_server(
@@ -330,9 +338,11 @@ def get_emails_imap_with_server(
     skip: int = 0,
     top: int = 20,
     server: str = IMAP_SERVER_NEW,
+    *,
+    account_id: int | None = None,
 ) -> Dict[str, Any]:
     """使用 IMAP 获取邮件列表（支持分页、文件夹选择和服务器选择）"""
-    token_result = get_access_token_imap_result(client_id, refresh_token)
+    token_result = get_access_token_imap_result(client_id, refresh_token, account_id=account_id)
     if not token_result.get("success"):
         return {"success": False, "error": token_result.get("error")}
 
@@ -497,9 +507,11 @@ def fetch_and_detail_imap_with_server(
     skip: int = 0,
     top: int = 1,
     server: str = IMAP_SERVER_NEW,
+    *,
+    account_id: int | None = None,
 ) -> Dict[str, Any]:
     """一次 IMAP 连接完成邮件列表 + 最新一封详情。"""
-    token_result = get_access_token_imap_result(client_id, refresh_token)
+    token_result = get_access_token_imap_result(client_id, refresh_token, account_id=account_id)
     if not token_result.get("success"):
         return {
             "success": False,
@@ -615,6 +627,8 @@ def get_emails_imap_concurrent(
     skip: int = 0,
     top: int = 20,
     servers: tuple = (IMAP_SERVER_NEW, "outlook.office365.com"),
+    *,
+    account_id: int | None = None,
 ) -> Dict[str, Any]:
     """并发连接多台 IMAP 服务器，返回第一个成功结果。"""
     if len(servers) <= 1:
@@ -626,6 +640,7 @@ def get_emails_imap_concurrent(
             skip,
             top,
             servers[0] if servers else IMAP_SERVER_NEW,
+            account_id=account_id,
         )
 
     last_error = None
@@ -640,6 +655,7 @@ def get_emails_imap_concurrent(
                 skip,
                 top,
                 server,
+                account_id=account_id,
             ): server
             for server in servers
         }
@@ -661,9 +677,11 @@ def get_email_detail_imap(
     refresh_token: str,
     message_id: str,
     folder: str = "inbox",
+    *,
+    account_id: int | None = None,
 ) -> Optional[Dict]:
     """使用 IMAP 获取邮件详情（默认使用新版服务器）。"""
-    return get_email_detail_imap_with_server(account, client_id, refresh_token, message_id, folder, IMAP_SERVER_NEW)
+    return get_email_detail_imap_with_server(account, client_id, refresh_token, message_id, folder, IMAP_SERVER_NEW, account_id=account_id)
 
 
 def get_email_detail_imap_with_server(
@@ -673,9 +691,11 @@ def get_email_detail_imap_with_server(
     message_id: str,
     folder: str = "inbox",
     server: str = IMAP_SERVER_NEW,
+    *,
+    account_id: int | None = None,
 ) -> Optional[Dict]:
     """使用 IMAP 获取邮件详情（支持指定服务器）。"""
-    access_token = get_access_token_imap(client_id, refresh_token)
+    access_token = get_access_token_imap(client_id, refresh_token, account_id=account_id)
     if not access_token:
         return None
 
@@ -760,9 +780,11 @@ def delete_emails_imap(
     refresh_token: str,
     message_ids: List[str],
     server: str,
+    *,
+    account_id: int | None = None,
 ) -> Dict[str, Any]:
     """通过 IMAP 删除邮件（永久删除）"""
-    access_token = get_access_token_graph(client_id, refresh_token)
+    access_token = get_access_token_imap(client_id, refresh_token, account_id=account_id)
     if not access_token:
         return {"success": False, "error": "获取 Access Token 失败"}
 

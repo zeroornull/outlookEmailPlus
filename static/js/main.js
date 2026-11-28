@@ -312,13 +312,19 @@
                 return formatAccountStatusLabel(account.status);
             }
             const healthLabels = {
-                active: '正常',
+                active: isRefreshableOutlookAccount(account) ? '授权有效' : '正常',
                 disabled: '停用',
                 expired: '授权过期',
                 error: '刷新异常',
                 pending_refresh: '待验证'
             };
             return translateAppTextLocal(healthLabels[account.health_status] || account.health_status);
+        }
+
+        function formatAccountHealthHelp(account) {
+            return isRefreshableOutlookAccount(account)
+                ? translateAppTextLocal('Token 刷新成功仅表示授权有效，不代表已验证邮箱读取权限。')
+                : '';
         }
 
         function isRefreshableOutlookAccount(accountLike) {

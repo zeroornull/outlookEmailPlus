@@ -2398,7 +2398,7 @@ def api_refresh_account(account_id: int) -> Any:
     """刷新单个账号的 token"""
     db = get_db()
     cursor = db.execute(
-        "SELECT id, email, client_id, refresh_token, group_id, account_type FROM accounts WHERE id = ?",
+        "SELECT id, email, client_id, refresh_token, group_id, account_type, provider FROM accounts WHERE id = ?",
         (account_id,),
     )
     account = cursor.fetchone()
@@ -2418,7 +2418,7 @@ def api_refresh_account(account_id: int) -> Any:
     client_id = account["client_id"]
     encrypted_refresh_token = account["refresh_token"]
 
-    if not refresh_service.is_refreshable_outlook_account(account["account_type"]):
+    if not refresh_service.is_refreshable_outlook_account(account["account_type"], provider=account["provider"]):
         return build_error_response(
             "ACCOUNT_REFRESH_UNSUPPORTED",
             "IMAP 账号不支持 Token 刷新",
@@ -2447,26 +2447,13 @@ def api_refresh_account(account_id: int) -> Any:
     # 测试 refresh token（并支持滚动更新 refresh_token）
     success, error_msg, new_refresh_token = graph_service.test_refresh_token_with_rotation(client_id, refresh_token, proxy_url)
 
-    # 记录刷新结果
-    refresh_logs_repo.log_refresh_result(
-        account_id,
-        account_email,
-        "manual",
-        "success" if success else "failed",
-        error_msg,
+    success, error_msg, _ = refresh_service.persist_refresh_result(
+        db, account_id=account_id, account_email=account_email, client_id=client_id,
+        previous_refresh_token=refresh_token, new_refresh_token=new_refresh_token,
+        refresh_type="manual", success=success, error_message=error_msg,
     )
 
     if success:
-        try:
-            if isinstance(new_refresh_token, str) and new_refresh_token.strip() and new_refresh_token != refresh_token:
-                accounts_repo.update_refresh_token_if_changed(account_id, new_refresh_token)
-            db.execute(
-                "UPDATE accounts SET last_refresh_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (account_id,),
-            )
-            db.commit()
-        except Exception:
-            pass
         return jsonify({"success": True, "message": "Token 刷新成功"})
 
     error_payload = build_error_payload(

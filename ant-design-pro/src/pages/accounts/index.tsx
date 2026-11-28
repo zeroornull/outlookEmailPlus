@@ -84,6 +84,7 @@ import {
   ACCOUNT_STATUS_OPTIONS,
   accountStatusLabel,
   healthStatusColor,
+  healthStatusHelp,
   healthStatusLabel,
   refreshStatusLabel,
 } from '@/utils/statusLabels';
@@ -253,11 +254,14 @@ const AccountsPage: React.FC = () => {
       render: (_, row) => (
         <Tag
           color={healthStatusColor(row.health_status ?? row.status)}
-          title={String(row.status || '').toLowerCase() === 'active' ? '点击停用账号' : '点击启用账号'}
+          title={[
+            healthStatusHelp(row),
+            String(row.status || '').toLowerCase() === 'active' ? '点击停用账号' : '点击启用账号',
+          ].filter(Boolean).join(' ')}
           style={{ cursor: 'pointer' }}
           onClick={() => void onToggleStatus(row)}
         >
-          {healthStatusLabel(row.health_status ?? row.status)}
+          {row.health_status ? healthStatusLabel(row.health_status, row) : accountStatusLabel(row.status)}
         </Tag>
       ),
     },

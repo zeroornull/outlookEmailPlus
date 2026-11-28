@@ -87,14 +87,6 @@ def _build_account_credential_decrypt_failed_response(account: dict[str, Any]):
     )
 
 
-def _persist_refresh_token(account: Dict[str, Any], new_refresh_token: str) -> None:
-    token = str(new_refresh_token or "").strip()
-    if not token:
-        return
-    if accounts_repo.update_refresh_token_if_changed(int(account["id"]), token):
-        account["refresh_token"] = token
-
-
 def _update_account_summary_from_verification(account: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, Any]:
     return compact_summary_service.update_summary_from_verification(
         int(account["id"]),
@@ -320,7 +312,9 @@ def api_batch_get_emails() -> Any:
                     skip,
                     top,
                     proxy_url,
+                    account_id=int(account["id"]),
                 )
+                account["refresh_token"] = (accounts_repo.get_account_by_id(int(account["id"])) or {}).get("refresh_token", account.get("refresh_token", ""))
                 if graph_result.get("success"):
                     emails = graph_result.get("emails", [])
                     account_summary = compact_summary_service.update_summary_from_message_list(
@@ -329,10 +323,7 @@ def api_batch_get_emails() -> Any:
                         folder=folder,
                     )
                     # Token Rotation + 刷新时间
-                    new_rt = graph_result.get("new_refresh_token")
-                    if new_rt:
-                        _persist_refresh_token(account, str(new_rt or ""))
-                    accounts_repo.touch_last_refresh_at(int(account["id"]))
+
 
                     formatted = []
                     for e in emails:
@@ -366,7 +357,9 @@ def api_batch_get_emails() -> Any:
                     skip,
                     top,
                     IMAP_SERVER_NEW,
+                    account_id=int(account["id"]),
                 )
+                account["refresh_token"] = (accounts_repo.get_account_by_id(int(account["id"])) or {}).get("refresh_token", account.get("refresh_token", ""))
                 if imap_new_result.get("success"):
                     account_summary = compact_summary_service.update_summary_from_message_list(
                         int(account["id"]),
@@ -391,7 +384,9 @@ def api_batch_get_emails() -> Any:
                     skip,
                     top,
                     IMAP_SERVER_OLD,
+                    account_id=int(account["id"]),
                 )
+                account["refresh_token"] = (accounts_repo.get_account_by_id(int(account["id"])) or {}).get("refresh_token", account.get("refresh_token", ""))
                 if imap_old_result.get("success"):
                     account_summary = compact_summary_service.update_summary_from_message_list(
                         int(account["id"]),
@@ -530,7 +525,8 @@ def api_get_emails(email_addr: str) -> Any:
 
     # 1. 尝试 Graph API
     _t_graph = time.monotonic()
-    graph_result = graph_service.get_emails_graph(account["client_id"], account["refresh_token"], folder, skip, top, proxy_url)
+    graph_result = graph_service.get_emails_graph(account["client_id"], account["refresh_token"], folder, skip, top, proxy_url, account_id=int(account["id"]))
+    account["refresh_token"] = (accounts_repo.get_account_by_id(int(account["id"])) or {}).get("refresh_token", account.get("refresh_token", ""))
     _LOGGER.debug(
         "[PERF] get_emails | email=%s | graph_api | %dms | success=%s",
         email_addr,
@@ -545,10 +541,7 @@ def api_get_emails(email_addr: str) -> Any:
             folder=folder,
         )
         # 更新刷新时间，同时保存 Microsoft 可能返回的新 refresh_token（Token Rotation）
-        new_rt = graph_result.get("new_refresh_token")
-        if new_rt:
-            _persist_refresh_token(account, str(new_rt or ""))
-        accounts_repo.touch_last_refresh_at(int(account["id"]))
+
 
         # 格式化 Graph API 返回的数据
         formatted = []
@@ -605,7 +598,9 @@ def api_get_emails(email_addr: str) -> Any:
         skip,
         top,
         IMAP_SERVER_NEW,
+        account_id=int(account["id"]),
     )
+    account["refresh_token"] = (accounts_repo.get_account_by_id(int(account["id"])) or {}).get("refresh_token", account.get("refresh_token", ""))
     _LOGGER.debug(
         "[PERF] get_emails | email=%s | imap_new | %dms | success=%s",
         email_addr,
@@ -645,7 +640,9 @@ def api_get_emails(email_addr: str) -> Any:
         skip,
         top,
         IMAP_SERVER_OLD,
+        account_id=int(account["id"]),
     )
+    account["refresh_token"] = (accounts_repo.get_account_by_id(int(account["id"])) or {}).get("refresh_token", account.get("refresh_token", ""))
     _LOGGER.debug(
         "[PERF] get_emails | email=%s | imap_old | %dms | success=%s",
         email_addr,
@@ -749,7 +746,9 @@ def api_delete_emails() -> Any:
         delete_emails_imap=imap_service.delete_emails_imap,
         imap_server_new=IMAP_SERVER_NEW,
         imap_server_old=IMAP_SERVER_OLD,
+        account_id=int(account["id"]),
     )
+    account["refresh_token"] = (accounts_repo.get_account_by_id(int(account["id"])) or {}).get("refresh_token", account.get("refresh_token", ""))
 
     if method_used == "graph":
         log_audit(
@@ -842,7 +841,8 @@ def api_get_email_detail(email_addr: str, message_id: str) -> Any:
                 proxy_url = group.get("proxy_url", "") or ""
 
         _t_graph = time.monotonic()
-        detail = graph_service.get_email_detail_graph(account["client_id"], account["refresh_token"], message_id, proxy_url)
+        detail = graph_service.get_email_detail_graph(account["client_id"], account["refresh_token"], message_id, proxy_url, account_id=int(account["id"]))
+        account["refresh_token"] = (accounts_repo.get_account_by_id(int(account["id"])) or {}).get("refresh_token", account.get("refresh_token", ""))
         _LOGGER.debug(
             "[PERF] get_email_detail | email=%s | graph_api | %dms | success=%s",
             email_addr,
@@ -883,7 +883,9 @@ def api_get_email_detail(email_addr: str, message_id: str) -> Any:
         account["refresh_token"],
         message_id,
         folder,
+        account_id=int(account["id"]),
     )
+    account["refresh_token"] = (accounts_repo.get_account_by_id(int(account["id"])) or {}).get("refresh_token", account.get("refresh_token", ""))
     _LOGGER.debug(
         "[PERF] get_email_detail | email=%s | imap_fallback | %dms | success=%s",
         email_addr,
